@@ -1,0 +1,4 @@
+{
+  "rust-analyzer.cargo.useRustcWrapperForBuildScripts": true,
+  "rust-analyzer.checkOnSave.command": "clippy"
+}

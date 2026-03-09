@@ -1,0 +1,86 @@
+[package]
+name = "coffee_classifier_system"
+version = "0.1.0"
+edition = "2021"
+
+# Multiple binaries
+[[bin]]
+name = "main_gui"
+path = "src/bin/main_gui.rs"
+
+[[bin]]
+name = "predict_gui"
+path = "src/bin/predict_gui.rs"
+
+[[bin]]
+name = "train"
+path = "src/bin/train.rs"
+
+[lib]
+name = "coffee_classifier"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pca_viz"
+path = "src/bin/pca_viz.rs"
+
+[[bin]]
+name = "train_rf_gui"
+path = "src/bin/train_rf_gui.rs"
+
+[[bin]]
+name = "train_svm_gui"
+path = "src/bin/train_svm_gui.rs"
+
+[[bin]]
+name = "train_lstm_gui"
+path = "src/bin/train_lstm_gui.rs"
+
+[[bin]]
+name = "train_mlp_gui"
+path = "src/bin/train_mlp_gui.rs"
+
+[dependencies]
+# GUI dependencies
+eframe = {version = "0.28", default-features = false, features = ["glow", "default_fonts", "x11"] }
+egui = "0.28"
+egui_plot = "0.28"
+rfd = "0.14"
+nalgebra = "0.32"
+
+# Serial communication
+serialport = "4.5"
+plotters = "0.3"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Data processing
+ndarray = { version = "0.15", features = ["serde"] }
+csv = "1.3"
+polars = "0.33"
+polars-io = { version = "0.33", features = ["parquet"] }
+
+# ML utilities
+rand = "0.8"
+rand_distr = "0.4"
+statrs = "0.17"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# Utilities
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
+colored = "2.1"
+walkdir = "2.4"
+directories = "5.0"
+
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = 2

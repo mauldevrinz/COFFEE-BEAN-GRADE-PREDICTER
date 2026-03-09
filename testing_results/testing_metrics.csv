@@ -1,0 +1,23 @@
+=== TESTING RESULTS ===
+Predicted Class,Low Quality
+Confidence,1.0000
+Accuracy,1.0000
+Precision,0.0000
+Recall,0.0000
+F1 Score,0.0000
+AUC Score,0.0000
+
+=== CONFUSION MATRIX ===
+,Predicted High,Predicted Low
+Actual High,0,0
+Actual Low,0,1
+
+=== PER-CLASS METRICS ===
+Class,Precision,Recall,F1-Score,Support
+High Quality,0.0000,0.0000,0.0000,0
+Low Quality,1.0000,1.0000,0.0000,1
+
+=== ROC CURVE DATA ===
+FPR,TPR
+0.000000,0.000000
+1.000000,0.000000
