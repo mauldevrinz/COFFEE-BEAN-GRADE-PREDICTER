@@ -41,6 +41,7 @@ pub struct PowerSummary {
 pub struct PowerMonitor {
     pub samples: Arc<Mutex<Vec<PowerSample>>>,
     stop_flag: Arc<AtomicBool>,
+    is_stopped: Arc<AtomicBool>,
 }
 
 impl PowerMonitor {
@@ -48,15 +49,17 @@ impl PowerMonitor {
     pub fn start() -> Self {
         let samples = Arc::new(Mutex::new(Vec::<PowerSample>::new()));
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let is_stopped = Arc::new(AtomicBool::new(false));
         let start_time = Instant::now();
 
         let samples_clone = Arc::clone(&samples);
         let stop_clone = Arc::clone(&stop_flag);
+        let stopped_clone = Arc::clone(&is_stopped);
 
         thread::spawn(move || {
             let mut child = match Command::new("tegrastats")
                 .arg("--interval")
-                .arg("1000")
+                .arg("200")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
@@ -85,14 +88,32 @@ impl PowerMonitor {
                     }
                 }
             }
+            stopped_clone.store(true, Ordering::Relaxed);
         });
 
-        Self { samples, stop_flag }
+        Self { samples, stop_flag, is_stopped }
     }
 
     /// Signal the tegrastats process to stop.
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+    }
+
+    /// Returns true if the monitor has been stopped.
+    pub fn is_stopped(&self) -> bool {
+        self.is_stopped.load(Ordering::Relaxed)
+    }
+
+    /// Number of samples collected so far.
+    pub fn sample_count(&self) -> usize {
+        self.samples.lock().map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Clear all collected samples (use when restarting a training run).
+    pub fn clear(&self) {
+        if let Ok(mut v) = self.samples.lock() {
+            v.clear();
+        }
     }
 
     /// Latest sample, or None if no data yet.
@@ -101,32 +122,43 @@ impl PowerMonitor {
     }
 
     /// Running total energy consumed so far (Joules).
-    /// Each sample represents ~1 second at that wattage level.
+    /// Each sample represents ~0.2 seconds (200ms interval) at that wattage level.
     pub fn accumulated_joules(&self) -> f32 {
+        self.accumulated_joules_from(0)
+    }
+
+    /// Energy consumed from a specific sample index onwards (Joules).
+    pub fn accumulated_joules_from(&self, start_idx: usize) -> f32 {
         self.samples
             .lock()
-            .map(|v| v.iter().map(|s| s.vdd_in_mw as f32 / 1000.0).sum::<f32>())
+            .map(|v| v[start_idx.min(v.len())..].iter().map(|s| s.vdd_in_mw as f32 / 1000.0 * 0.2).sum::<f32>())
             .unwrap_or(0.0)
     }
 
     /// Compute summary statistics over all collected samples.
     pub fn summary(&self) -> Option<PowerSummary> {
+        self.summary_from(0)
+    }
+
+    /// Compute summary statistics only for samples from start_idx onwards (training-period only).
+    pub fn summary_from(&self, start_idx: usize) -> Option<PowerSummary> {
         let samples = self.samples.lock().ok()?;
-        if samples.is_empty() {
+        let slice = &samples[start_idx.min(samples.len())..];
+        if slice.is_empty() {
             return None;
         }
-        let n = samples.len() as f32;
-        let avg_total_w = samples.iter().map(|s| s.vdd_in_mw as f32).sum::<f32>() / n / 1000.0;
-        let peak_total_w = samples.iter().map(|s| s.vdd_in_mw as f32).fold(0.0f32, f32::max) / 1000.0;
-        let avg_cpu_gpu_w = samples.iter().map(|s| s.vdd_cpu_gpu_mw as f32).sum::<f32>() / n / 1000.0;
-        let peak_cpu_gpu_w = samples.iter().map(|s| s.vdd_cpu_gpu_mw as f32).fold(0.0f32, f32::max) / 1000.0;
-        let avg_cpu_temp = samples.iter().map(|s| s.cpu_temp_c).sum::<f32>() / n;
-        let peak_cpu_temp = samples.iter().map(|s| s.cpu_temp_c).fold(0.0f32, f32::max);
-        let avg_gpu_temp = samples.iter().map(|s| s.gpu_temp_c).sum::<f32>() / n;
-        let peak_gpu_temp = samples.iter().map(|s| s.gpu_temp_c).fold(0.0f32, f32::max);
-        let duration_secs = samples.last().map(|s| s.elapsed_secs).unwrap_or(0.0);
-        // Sum each 1-second sample's contribution for accurate total energy
-        let energy_joules: f32 = samples.iter().map(|s| s.vdd_in_mw as f32 / 1000.0).sum();
+        let n = slice.len() as f32;
+        let avg_total_w = slice.iter().map(|s| s.vdd_in_mw as f32).sum::<f32>() / n / 1000.0;
+        let peak_total_w = slice.iter().map(|s| s.vdd_in_mw as f32).fold(0.0f32, f32::max) / 1000.0;
+        let avg_cpu_gpu_w = slice.iter().map(|s| s.vdd_cpu_gpu_mw as f32).sum::<f32>() / n / 1000.0;
+        let peak_cpu_gpu_w = slice.iter().map(|s| s.vdd_cpu_gpu_mw as f32).fold(0.0f32, f32::max) / 1000.0;
+        let avg_cpu_temp = slice.iter().map(|s| s.cpu_temp_c).sum::<f32>() / n;
+        let peak_cpu_temp = slice.iter().map(|s| s.cpu_temp_c).fold(0.0f32, f32::max);
+        let avg_gpu_temp = slice.iter().map(|s| s.gpu_temp_c).sum::<f32>() / n;
+        let peak_gpu_temp = slice.iter().map(|s| s.gpu_temp_c).fold(0.0f32, f32::max);
+        let duration_secs = slice.last().map(|s| s.elapsed_secs).unwrap_or(0.0)
+            - slice.first().map(|s| s.elapsed_secs).unwrap_or(0.0);
+        let energy_joules: f32 = slice.iter().map(|s| s.vdd_in_mw as f32 / 1000.0 * 0.2).sum();
 
         Some(PowerSummary {
             avg_total_w,
@@ -139,7 +171,7 @@ impl PowerMonitor {
             peak_gpu_temp,
             energy_joules,
             duration_secs,
-            sample_count: samples.len(),
+            sample_count: slice.len(),
         })
     }
 }

@@ -62,6 +62,7 @@ struct RFTrainingGUI {
     // Progress: (trees_done, total_trees) updated atomically by training thread
     trees_done: Arc<AtomicUsize>,
     power_monitor: Option<PowerMonitor>,
+    training_start_sample: usize,
     screenshot_requested: bool,
     screenshot_saved: Option<String>,
     total_trees: usize,
@@ -87,7 +88,8 @@ impl Default for RFTrainingGUI {
             rf_result: None,
             status_log: Arc::new(Mutex::new(Vec::new())),
             trees_done: Arc::new(AtomicUsize::new(0)),
-            power_monitor: None,
+            power_monitor: Some(PowerMonitor::start()),
+            training_start_sample: 0,
             screenshot_requested: false,
             screenshot_saved: None,
             total_trees: 100,
@@ -173,7 +175,13 @@ impl RFTrainingGUI {
         self.final_time = None;
         self.rf_result = None;
         self.trees_done.store(0, Ordering::Relaxed);
-        self.power_monitor = Some(PowerMonitor::start());
+        let needs_new_monitor = self.power_monitor.as_ref().map(|pm| pm.is_stopped()).unwrap_or(true);
+        if needs_new_monitor {
+            self.power_monitor = Some(PowerMonitor::start());
+            self.training_start_sample = 0;
+        } else {
+            self.training_start_sample = self.power_monitor.as_ref().map(|pm| pm.sample_count()).unwrap_or(0);
+        }
         self.total_trees = 100; // must match rf_config.n_trees below
 
         if let Ok(mut log) = self.status_log.lock() { log.clear(); }
@@ -767,6 +775,43 @@ impl eframe::App for RFTrainingGUI {
                         }
                     }
                     ui.add_space(15.0);
+                    let pred_size = egui::vec2(150.0, 40.0);
+                    let (pred_rect, pred_resp) = ui.allocate_exact_size(pred_size, egui::Sense::click());
+                    let pred_fill = if pred_resp.hovered() {
+                        egui::Color32::from_rgb(220, 120, 0)
+                    } else {
+                        egui::Color32::from_rgb(200, 100, 0)
+                    };
+                    ui.painter().rect_filled(pred_rect, 4.0, pred_fill);
+                    let pred_t = ui.painter().layout_no_wrap(
+                        "🔍 Predict".to_string(),
+                        egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())),
+                        egui::Color32::WHITE,
+                    );
+                    let pred_tp = egui::pos2(
+                        pred_rect.center().x - pred_t.size().x / 2.0,
+                        pred_rect.center().y - pred_t.size().y / 2.0,
+                    );
+                    ui.painter().galley(pred_tp, pred_t, egui::Color32::WHITE);
+                    if pred_resp.clicked() {
+                        std::thread::spawn(|| {
+                            use std::process::Command;
+                            let display = std::env::var("DISPLAY").unwrap_or("0".to_string());
+                            let binary_path = std::env::current_exe()
+                                .ok()
+                                .and_then(|p| p.parent().map(|d| d.join("predict_rf_gui")))
+                                .unwrap_or_else(|| std::path::PathBuf::from("./target/release/predict_rf_gui"));
+                            if let Err(e) = Command::new(&binary_path)
+                                .env("DISPLAY", display)
+                                .env("LIBGL_ALWAYS_SOFTWARE", "1")
+                                .env("GDK_BACKEND", "x11")
+                                .spawn()
+                            {
+                                eprintln!("[X] Failed to launch predict GUI: {}", e);
+                            }
+                        });
+                    }
+                    ui.add_space(15.0);
                     // Manage Data button
                     if !self.training_complete {
                         let manage_size = egui::vec2(150.0, 40.0);
@@ -959,7 +1004,7 @@ impl eframe::App for RFTrainingGUI {
                                                     .size(13.0)
                                                     .color(egui::Color32::from_rgb(60, 60, 60))
                                                     .family(egui::FontFamily::Name("Poppins".into())));
-                                                let total_j = pm.accumulated_joules();
+                                                let total_j = pm.accumulated_joules_from(self.training_start_sample);
                                                 ui.label(egui::RichText::new(format!(
                                                     "System {:.1} W  |  CPU+GPU {:.1} W  |  🌡 CPU {:.1}°C  GPU {:.1}°C  |  ⚡ Total: {:.1} J ({:.4} Wh)",
                                                     s.vdd_in_mw as f32 / 1000.0,
@@ -1003,7 +1048,7 @@ impl eframe::App for RFTrainingGUI {
 
                             // ── Power Summary ──
                             if let Some(ref pm) = self.power_monitor {
-                                if let Some(ps) = pm.summary() {
+                                if let Some(ps) = pm.summary_from(self.training_start_sample) {
                                     egui::Frame::none()
                                         .fill(egui::Color32::from_rgb(245, 240, 255))
                                         .inner_margin(10.0)

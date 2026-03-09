@@ -13,6 +13,22 @@ name = "predict_gui"
 path = "src/bin/predict_gui.rs"
 
 [[bin]]
+name = "predict_rf_gui"
+path = "src/bin/predict_rf_gui.rs"
+
+[[bin]]
+name = "predict_svm_gui"
+path = "src/bin/predict_svm_gui.rs"
+
+[[bin]]
+name = "predict_mlp_gui"
+path = "src/bin/predict_mlp_gui.rs"
+
+[[bin]]
+name = "predict_lstm_gui"
+path = "src/bin/predict_lstm_gui.rs"
+
+[[bin]]
 name = "train"
 path = "src/bin/train.rs"
 

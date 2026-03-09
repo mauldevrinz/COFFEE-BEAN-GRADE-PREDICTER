@@ -3,6 +3,7 @@
 
 use coffee_classifier::ml::*;
 use coffee_classifier::ml::evaluation::EvaluationResults;
+use coffee_classifier::power_monitor::PowerMonitor;
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints, Legend, Corner};
 use ndarray::{s, Array1};
@@ -91,6 +92,8 @@ struct TrainingGUI {
     low_grade_expanded: bool,
     last_refresh: Instant,
     refresh_interval: Duration,
+    power_monitor: Option<PowerMonitor>,
+    training_start_sample: usize,
 }
 
 impl Default for TrainingGUI {
@@ -113,6 +116,8 @@ impl Default for TrainingGUI {
             low_grade_expanded: false,
             last_refresh: Instant::now(),
             refresh_interval: Duration::from_secs(2),
+            power_monitor: Some(PowerMonitor::start()),
+            training_start_sample: 0,
         }
     }
 }
@@ -643,6 +648,13 @@ chart.draw_series(label_points.iter().map(|&point| {
         self.current_epoch = 0;
         self.train_eval = None;
         self.val_eval = None;
+        let needs_new_monitor = self.power_monitor.as_ref().map(|pm| pm.is_stopped()).unwrap_or(true);
+        if needs_new_monitor {
+            self.power_monitor = Some(PowerMonitor::start());
+            self.training_start_sample = 0;
+        } else {
+            self.training_start_sample = self.power_monitor.as_ref().map(|pm| pm.sample_count()).unwrap_or(0);
+        }
         
         if let Ok(mut history) = self.metrics_history.lock() {
             history.clear();
@@ -954,6 +966,7 @@ chart.draw_series(label_points.iter().map(|&point| {
                 self.val_eval = Some(val_eval);
                 self.is_training = false;
                 self.training_complete = true;
+                if let Some(ref pm) = self.power_monitor { pm.stop(); }
                 
                 if let Some(start) = self.start_time {
                     self.final_time = Some(start.elapsed().as_secs_f64());
@@ -1147,7 +1160,37 @@ impl eframe::App for TrainingGUI {
                     });
                 });
                 ui.add_space(15.0);
-                
+
+                // ── Live Power (during training) ─────────────────────
+                if self.is_training {
+                    if let Some(ref pm) = self.power_monitor {
+                        if let Some(s) = pm.current_sample() {
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                ui.label(egui::RichText::new("⚡ Power:")
+                                    .size(13.0)
+                                    .color(egui::Color32::from_rgb(60, 60, 60))
+                                    .family(egui::FontFamily::Name("Poppins".into())));
+                                let total_j = pm.accumulated_joules_from(self.training_start_sample);
+                                ui.label(egui::RichText::new(format!(
+                                    "System {:.1} W  |  CPU+GPU {:.1} W  |  🌡 CPU {:.1}°C  GPU {:.1}°C  |  ⚡ Total: {:.1} J ({:.4} Wh)",
+                                    s.vdd_in_mw as f32 / 1000.0,
+                                    s.vdd_cpu_gpu_mw as f32 / 1000.0,
+                                    s.cpu_temp_c,
+                                    s.gpu_temp_c,
+                                    total_j,
+                                    total_j / 3600.0,
+                                ))
+                                .size(13.0)
+                                .color(egui::Color32::from_rgb(15, 92, 112))
+                                .family(egui::FontFamily::Name("Poppins".into())));
+                            });
+                            ui.add_space(6.0);
+                        }
+                    }
+                }
+
                 if self.training_complete && self.train_eval.is_some() && self.val_eval.is_some() {
                     let train_eval = self.train_eval.as_ref().unwrap();
                     let val_eval = self.val_eval.as_ref().unwrap();
@@ -1163,6 +1206,59 @@ impl eframe::App for TrainingGUI {
                         });
                     });
                     ui.add_space(15.0);
+
+                    // ── Power Summary ────────────────────────────────
+                    if let Some(ref pm) = self.power_monitor {
+                        if let Some(ps) = pm.summary_from(self.training_start_sample) {
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                egui::Frame::none()
+                                    .fill(egui::Color32::from_rgb(235, 246, 250))
+                                    .inner_margin(10.0)
+                                    .rounding(5.0)
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 200, 215)))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("⚡ Power Summary")
+                                                .size(13.0)
+                                                .color(egui::Color32::from_rgb(15, 92, 112))
+                                                .family(egui::FontFamily::Name("PoppinsBold".into())));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                ui.label(egui::RichText::new(format!("{} samples", ps.sample_count))
+                                                    .size(11.0)
+                                                    .color(egui::Color32::from_rgb(150, 150, 150))
+                                                    .family(egui::FontFamily::Name("Poppins".into())));
+                                            });
+                                        });
+                                        ui.add_space(5.0);
+                                        ui.columns(4, |cols| {
+                                            cols[0].vertical_centered(|ui| {
+                                                ui.label(egui::RichText::new("Avg System").size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                                ui.label(egui::RichText::new(format!("{:.1} W", ps.avg_total_w)).size(15.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
+                                                ui.label(egui::RichText::new(format!("Peak {:.1} W", ps.peak_total_w)).size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                            });
+                                            cols[1].vertical_centered(|ui| {
+                                                ui.label(egui::RichText::new("Avg CPU+GPU").size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                                ui.label(egui::RichText::new(format!("{:.1} W", ps.avg_cpu_gpu_w)).size(15.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
+                                                ui.label(egui::RichText::new(format!("Peak {:.1} W", ps.peak_cpu_gpu_w)).size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                            });
+                                            cols[2].vertical_centered(|ui| {
+                                                ui.label(egui::RichText::new("CPU/GPU Temp").size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                                ui.label(egui::RichText::new(format!("{:.1}°C / {:.1}°C", ps.avg_cpu_temp, ps.avg_gpu_temp)).size(15.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
+                                                ui.label(egui::RichText::new(format!("Peak {:.1}°C / {:.1}°C", ps.peak_cpu_temp, ps.peak_gpu_temp)).size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                            });
+                                            cols[3].vertical_centered(|ui| {
+                                                ui.label(egui::RichText::new("🔋 Total Energy").size(11.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
+                                                ui.label(egui::RichText::new(format!("{:.1} J", ps.energy_joules)).size(18.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
+                                                ui.label(egui::RichText::new(format!("{:.4} Wh", ps.energy_joules / 3600.0)).size(12.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("Poppins".into())));
+                                            });
+                                        });
+                                    });
+                            });
+                            ui.add_space(10.0);
+                        }
+                    }
                 }
                 
                 ui.add_space(10.0);
@@ -1270,6 +1366,43 @@ impl eframe::App for TrainingGUI {
                             if manage_response.clicked() {
                                 Self::open_file_explorer();
                             }
+                        }
+
+                        // Predict Button
+                        let pred_size = egui::vec2(150.0, 40.0);
+                        let (pred_rect, pred_resp) = ui.allocate_exact_size(pred_size, egui::Sense::click());
+                        let pred_fill = if pred_resp.hovered() {
+                            egui::Color32::from_rgb(220, 120, 0)
+                        } else {
+                            egui::Color32::from_rgb(200, 100, 0)
+                        };
+                        ui.painter().rect_filled(pred_rect, 4.0, pred_fill);
+                        let pred_t = ui.painter().layout_no_wrap(
+                            "🔍 Predict".to_string(),
+                            egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())),
+                            egui::Color32::WHITE,
+                        );
+                        let pred_tp = egui::pos2(
+                            pred_rect.center().x - pred_t.size().x / 2.0,
+                            pred_rect.center().y - pred_t.size().y / 2.0,
+                        );
+                        ui.painter().galley(pred_tp, pred_t, egui::Color32::WHITE);
+                        if pred_resp.clicked() {
+                            std::thread::spawn(|| {
+                                let display = std::env::var("DISPLAY").unwrap_or("0".to_string());
+                                let binary_path = std::env::current_exe()
+                                    .ok()
+                                    .and_then(|p| p.parent().map(|d| d.join("predict_gui")))
+                                    .unwrap_or_else(|| std::path::PathBuf::from("./target/release/predict_gui"));
+                                if let Err(e) = Command::new(&binary_path)
+                                    .env("DISPLAY", display)
+                                    .env("LIBGL_ALWAYS_SOFTWARE", "1")
+                                    .env("GDK_BACKEND", "x11")
+                                    .spawn()
+                                {
+                                    eprintln!("[X] Failed to launch predict GUI: {}", e);
+                                }
+                            });
                         }
                     });
                     

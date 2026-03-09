@@ -330,6 +330,33 @@ impl CoffeeSVM {
         preds
     }
 
+    /// Prediksi dengan confidence score menggunakan sigmoid pada decision value
+    pub fn predict_with_confidence(&self, data: &ndarray::Array3<f32>) -> Vec<(i64, f32, f32)> {
+        let n_samples = data.shape()[0];
+        let n_features = self.n_features;
+        let stats = self.feature_stats.as_ref().expect("Model belum ditraining");
+
+        let mut feat_mat = Array2::<f32>::zeros((n_samples, n_features));
+        for i in 0..n_samples {
+            let sample = data.slice(s![i, .., ..]).to_owned();
+            let f = extract_features_svm(&sample);
+            for (j, &v) in f.iter().enumerate() {
+                feat_mat[[i, j]] = v;
+            }
+        }
+
+        let feat_norm = stats.transform(&feat_mat);
+        (0..n_samples).map(|i| {
+            let x_i: Vec<f32> = (0..n_features).map(|j| feat_norm[[i, j]]).collect();
+            let decision: f32 = self.weights.iter().zip(x_i.iter()).map(|(w, x)| w * x).sum::<f32>() + self.bias;
+            let class = Self::from_svm_label(decision);
+            // sigmoid to convert decision value to pseudo-probability
+            let p_high = 1.0 / (1.0 + (-decision).exp());
+            let p_low = 1.0 - p_high;
+            (class, p_high, p_low)
+        }).collect()
+    }
+
     /// Prediksi dari data mentah (n_samples, channels, timesteps)
     pub fn predict(&self, data: &ndarray::Array3<f32>) -> Array1<i64> {
         let n_samples = data.shape()[0];
