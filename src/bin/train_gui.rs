@@ -4,6 +4,7 @@
 use coffee_classifier::ml::*;
 use coffee_classifier::ml::evaluation::EvaluationResults;
 use coffee_classifier::power_monitor::PowerMonitor;
+use coffee_classifier::report::{TrainingReport, generate_training_pdf};
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints, Legend, Corner};
 use ndarray::{s, Array1};
@@ -77,6 +78,7 @@ struct TrainingGUI {
     is_training: bool,
     training_complete: bool,
     metrics_history: Arc<Mutex<Vec<TrainingMetrics>>>,
+    live_preview: Option<TrainingMetrics>,
     start_time: Option<Instant>,
     final_time: Option<f64>,
     metrics_receiver: Option<Receiver<TrainingMetrics>>,
@@ -92,8 +94,10 @@ struct TrainingGUI {
     low_grade_expanded: bool,
     last_refresh: Instant,
     refresh_interval: Duration,
+    file_scan_receiver: Option<Receiver<(Vec<FolderNode>, Vec<FolderNode>)>>,
     power_monitor: Option<PowerMonitor>,
     training_start_sample: usize,
+    pdf_saved: Option<String>,
 }
 
 impl Default for TrainingGUI {
@@ -102,6 +106,7 @@ impl Default for TrainingGUI {
             is_training: false,
             training_complete: false,
             metrics_history: Arc::new(Mutex::new(Vec::new())),
+            live_preview: None,
             start_time: None,
             final_time: None,
             metrics_receiver: None,
@@ -116,8 +121,10 @@ impl Default for TrainingGUI {
             low_grade_expanded: false,
             last_refresh: Instant::now(),
             refresh_interval: Duration::from_secs(2),
+            file_scan_receiver: None,
             power_monitor: Some(PowerMonitor::start()),
             training_start_sample: 0,
+            pdf_saved: None,
         }
     }
 }
@@ -125,144 +132,91 @@ impl Default for TrainingGUI {
 impl TrainingGUI {
     fn new() -> Self {
         let mut gui = Self::default();
-        gui.load_data_files();
+        // Initial load: spawn background thread so GUI starts responsive
+        let (tx, rx) = channel();
+        gui.file_scan_receiver = Some(rx);
+        thread::spawn(move || {
+            let _ = tx.send(Self::scan_data_files());
+        });
         gui
     }
     
-    fn auto_refresh_data(&mut self) {
-        if self.last_refresh.elapsed() >= self.refresh_interval {
-            let high_expanded_states: HashMap<String, (bool, HashMap<String, bool>)> =
-                [(
-                    "high_grade".to_string(),
-                    (
-                        self.high_grade_expanded,
-                        self.high_grade_folders.iter()
-                            .map(|f| (f.name.clone(), f.expanded))
-                            .collect()
-                    )
-                )].iter().cloned().collect();
-            
-            let low_expanded_states: HashMap<String, (bool, HashMap<String, bool>)> =
-                [(
-                    "low_grade".to_string(),
-                    (
-                        self.low_grade_expanded,
-                        self.low_grade_folders.iter()
-                            .map(|f| (f.name.clone(), f.expanded))
-                            .collect()
-                    )
-                )].iter().cloned().collect();
-            
-            self.load_data_files();
-            
-            if let Some((root_expanded, folder_states)) = high_expanded_states.get("high_grade") {
-                self.high_grade_expanded = *root_expanded;
-                for folder in &mut self.high_grade_folders {
-                    if let Some(&expanded) = folder_states.get(&folder.name) {
-                        folder.expanded = expanded;
+    /// Scan data files from disk — runs in background thread, NOT on UI thread.
+    fn scan_data_files() -> (Vec<FolderNode>, Vec<FolderNode>) {
+        fn scan_grade_path(path: &PathBuf) -> Vec<FolderNode> {
+            let mut result = Vec::new();
+            if let Ok(entries) = fs::read_dir(path) {
+                let mut folders: Vec<_> = entries.flatten()
+                    .filter(|e| e.path().is_dir())
+                    .collect();
+                folders.sort_by_key(|e| e.file_name());
+                for entry in folders {
+                    let folder_path = entry.path();
+                    let folder_name = folder_path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let mut files = Vec::new();
+                    if let Ok(file_entries) = fs::read_dir(&folder_path) {
+                        let mut csv_files: Vec<_> = file_entries.flatten()
+                            .filter(|f| {
+                                let p = f.path();
+                                p.is_file() && p.extension()
+                                    .and_then(|ext| ext.to_str())
+                                    .map_or(false, |ext| ext == "csv")
+                            })
+                            .collect();
+                        csv_files.sort_by_key(|f| f.file_name());
+                        for file in csv_files {
+                            files.push(file.file_name().to_string_lossy().to_string());
+                        }
                     }
+                    result.push(FolderNode { name: folder_name, files, expanded: false });
                 }
             }
-            
-            if let Some((root_expanded, folder_states)) = low_expanded_states.get("low_grade") {
-                self.low_grade_expanded = *root_expanded;
-                for folder in &mut self.low_grade_folders {
-                    if let Some(&expanded) = folder_states.get(&folder.name) {
-                        folder.expanded = expanded;
-                    }
-                }
-            }
-            
-            self.last_refresh = Instant::now();
+            result
         }
+
+        let high = scan_grade_path(&PathBuf::from("data/raw/high_grade"));
+        let low  = scan_grade_path(&PathBuf::from("data/raw/low_grade"));
+        (high, low)
     }
-    
-    fn load_data_files(&mut self) {
-        self.high_grade_folders.clear();
-        self.low_grade_folders.clear();
-        
-        let high_path = PathBuf::from("data/raw/high_grade");
-        if let Ok(entries) = fs::read_dir(&high_path) {
-            let mut folders: Vec<_> = entries.flatten()
-                .filter(|e| e.path().is_dir())
-                .collect();
-            folders.sort_by_key(|e| e.file_name());
-            
-            for entry in folders {
-                let folder_path = entry.path();
-                let folder_name = folder_path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                
-                let mut files = Vec::new();
-                if let Ok(file_entries) = fs::read_dir(&folder_path) {
-                    let mut csv_files: Vec<_> = file_entries.flatten()
-                        .filter(|f| {
-                            let path = f.path();
-                            path.is_file() && path.extension()
-                                .and_then(|ext| ext.to_str())
-                                .map_or(false, |ext| ext == "csv")
-                        })
-                        .collect();
-                    csv_files.sort_by_key(|f| f.file_name());
-                    
-                    for file in csv_files {
-                        let file_name = file.file_name()
-                            .to_string_lossy()
-                            .to_string();
-                        files.push(file_name);
-                    }
+
+    fn auto_refresh_data(&mut self) {
+        // Check if a previous background scan finished
+        let mut scan_done = false;
+        if let Some(ref rx) = self.file_scan_receiver {
+            if let Ok((high, low)) = rx.try_recv() {
+                // Preserve expanded states when updating
+                let high_states: HashMap<String, bool> = self.high_grade_folders.iter()
+                    .map(|f| (f.name.clone(), f.expanded)).collect();
+                let low_states: HashMap<String, bool> = self.low_grade_folders.iter()
+                    .map(|f| (f.name.clone(), f.expanded)).collect();
+
+                self.high_grade_folders = high;
+                self.low_grade_folders = low;
+
+                for f in &mut self.high_grade_folders {
+                    if let Some(&exp) = high_states.get(&f.name) { f.expanded = exp; }
                 }
-                
-                self.high_grade_folders.push(FolderNode {
-                    name: folder_name,
-                    files,
-                    expanded: false,
-                });
+                for f in &mut self.low_grade_folders {
+                    if let Some(&exp) = low_states.get(&f.name) { f.expanded = exp; }
+                }
+                scan_done = true;
             }
         }
-        
-        let low_path = PathBuf::from("data/raw/low_grade");
-        if let Ok(entries) = fs::read_dir(&low_path) {
-            let mut folders: Vec<_> = entries.flatten()
-                .filter(|e| e.path().is_dir())
-                .collect();
-            folders.sort_by_key(|e| e.file_name());
-            
-            for entry in folders {
-                let folder_path = entry.path();
-                let folder_name = folder_path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                
-                let mut files = Vec::new();
-                if let Ok(file_entries) = fs::read_dir(&folder_path) {
-                    let mut csv_files: Vec<_> = file_entries.flatten()
-                        .filter(|f| {
-                            let path = f.path();
-                            path.is_file() && path.extension()
-                                .and_then(|ext| ext.to_str())
-                                .map_or(false, |ext| ext == "csv")
-                        })
-                        .collect();
-                    csv_files.sort_by_key(|f| f.file_name());
-                    
-                    for file in csv_files {
-                        let file_name = file.file_name()
-                            .to_string_lossy()
-                            .to_string();
-                        files.push(file_name);
-                    }
-                }
-                
-                self.low_grade_folders.push(FolderNode {
-                    name: folder_name,
-                    files,
-                    expanded: false,
-                });
-            }
+        if scan_done {
+            self.file_scan_receiver = None;
+        }
+
+        // Schedule next background scan when interval elapses (only if no scan in flight)
+        if self.file_scan_receiver.is_none() && self.last_refresh.elapsed() >= self.refresh_interval {
+            let (tx, rx) = channel();
+            self.file_scan_receiver = Some(rx);
+            self.last_refresh = Instant::now();
+            thread::spawn(move || {
+                let _ = tx.send(Self::scan_data_files());
+            });
         }
     }
     
@@ -648,6 +602,7 @@ chart.draw_series(label_points.iter().map(|&point| {
         self.current_epoch = 0;
         self.train_eval = None;
         self.val_eval = None;
+        self.live_preview = None;
         let needs_new_monitor = self.power_monitor.as_ref().map(|pm| pm.is_stopped()).unwrap_or(true);
         if needs_new_monitor {
             self.power_monitor = Some(PowerMonitor::start());
@@ -953,9 +908,16 @@ chart.draw_series(label_points.iter().map(|&point| {
     fn update_metrics(&mut self) {
         if let Some(ref receiver) = self.metrics_receiver {
             while let Ok(metrics) = receiver.try_recv() {
-                if let Ok(mut history) = self.metrics_history.lock() {
-                    history.push(metrics);
-                    self.current_epoch = history.len();
+                if metrics.is_final {
+                    // Completed epoch — push to history and clear preview
+                    if let Ok(mut history) = self.metrics_history.lock() {
+                        history.push(metrics);
+                        self.current_epoch = history.len();
+                    }
+                    self.live_preview = None;
+                } else {
+                    // Intra-epoch batch preview — just overwrite live_preview
+                    self.live_preview = Some(metrics);
                 }
             }
         }
@@ -1053,6 +1015,10 @@ impl eframe::App for TrainingGUI {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::from_rgb(225, 225, 225)))
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_source("main_scroll")
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
                 ui.add_space(15.0);
                 
                 if !self.training_complete {
@@ -1214,44 +1180,44 @@ impl eframe::App for TrainingGUI {
                                 ui.add_space(20.0);
                                 egui::Frame::none()
                                     .fill(egui::Color32::from_rgb(235, 246, 250))
-                                    .inner_margin(10.0)
+                                    .inner_margin(5.0)
                                     .rounding(5.0)
-                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 200, 215)))
+                                    .rounding(4.0)
                                     .show(ui, |ui| {
                                         ui.set_min_width(ui.available_width());
                                         ui.horizontal(|ui| {
                                             ui.label(egui::RichText::new("⚡ Power Summary")
-                                                .size(13.0)
+                                                .size(11.0)
                                                 .color(egui::Color32::from_rgb(15, 92, 112))
                                                 .family(egui::FontFamily::Name("PoppinsBold".into())));
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 ui.label(egui::RichText::new(format!("{} samples", ps.sample_count))
-                                                    .size(11.0)
+                                                    .size(10.0)
                                                     .color(egui::Color32::from_rgb(150, 150, 150))
                                                     .family(egui::FontFamily::Name("Poppins".into())));
                                             });
                                         });
-                                        ui.add_space(5.0);
+                                        ui.add_space(2.0);
                                         ui.columns(4, |cols| {
                                             cols[0].vertical_centered(|ui| {
-                                                ui.label(egui::RichText::new("Avg System").size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
-                                                ui.label(egui::RichText::new(format!("{:.1} W", ps.avg_total_w)).size(15.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
-                                                ui.label(egui::RichText::new(format!("Peak {:.1} W", ps.peak_total_w)).size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                                ui.label(egui::RichText::new("Avg System").size(10.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                                ui.label(egui::RichText::new(format!("{:.1} W", ps.avg_total_w)).size(12.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
+                                                ui.label(egui::RichText::new(format!("Peak {:.1} W", ps.peak_total_w)).size(10.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
                                             });
                                             cols[1].vertical_centered(|ui| {
-                                                ui.label(egui::RichText::new("Avg CPU+GPU").size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
-                                                ui.label(egui::RichText::new(format!("{:.1} W", ps.avg_cpu_gpu_w)).size(15.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
-                                                ui.label(egui::RichText::new(format!("Peak {:.1} W", ps.peak_cpu_gpu_w)).size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                                ui.label(egui::RichText::new("Avg CPU+GPU").size(10.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                                ui.label(egui::RichText::new(format!("{:.1} W", ps.avg_cpu_gpu_w)).size(12.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
+                                                ui.label(egui::RichText::new(format!("Peak {:.1} W", ps.peak_cpu_gpu_w)).size(10.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
                                             });
                                             cols[2].vertical_centered(|ui| {
-                                                ui.label(egui::RichText::new("CPU/GPU Temp").size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
-                                                ui.label(egui::RichText::new(format!("{:.1}°C / {:.1}°C", ps.avg_cpu_temp, ps.avg_gpu_temp)).size(15.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
-                                                ui.label(egui::RichText::new(format!("Peak {:.1}°C / {:.1}°C", ps.peak_cpu_temp, ps.peak_gpu_temp)).size(11.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                                ui.label(egui::RichText::new("CPU/GPU Temp").size(10.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
+                                                ui.label(egui::RichText::new(format!("{:.1}°C / {:.1}°C", ps.avg_cpu_temp, ps.avg_gpu_temp)).size(12.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
+                                                ui.label(egui::RichText::new(format!("Peak {:.1}°C / {:.1}°C", ps.peak_cpu_temp, ps.peak_gpu_temp)).size(10.0).color(egui::Color32::from_rgb(130,130,130)).family(egui::FontFamily::Name("Poppins".into())));
                                             });
                                             cols[3].vertical_centered(|ui| {
-                                                ui.label(egui::RichText::new("🔋 Total Energy").size(11.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
-                                                ui.label(egui::RichText::new(format!("{:.1} J", ps.energy_joules)).size(18.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
-                                                ui.label(egui::RichText::new(format!("{:.4} Wh", ps.energy_joules / 3600.0)).size(12.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("Poppins".into())));
+                                                ui.label(egui::RichText::new("🔋 Total Energy").size(10.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
+                                                ui.label(egui::RichText::new(format!("{:.1} J", ps.energy_joules)).size(13.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("PoppinsBold".into())));
+                                                ui.label(egui::RichText::new(format!("{:.4} Wh", ps.energy_joules / 3600.0)).size(10.0).color(egui::Color32::from_rgb(15,92,112)).family(egui::FontFamily::Name("Poppins".into())));
                                             });
                                         });
                                     });
@@ -1262,196 +1228,231 @@ impl eframe::App for TrainingGUI {
                 }
                 
                 ui.add_space(10.0);
-                
-                  ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.add_space(30.0);
+                    }); // end ScrollArea
+            });
+        
+        egui::TopBottomPanel::bottom("bottom_bar")
+            .exact_height(70.0)
+            .frame(egui::Frame::none()
+                .fill(egui::Color32::from_rgb(225, 225, 225))
+                .inner_margin(egui::Margin::symmetric(20.0, 15.0)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    // START TRAINING Button
+                    let button_size = egui::vec2(200.0, 40.0);
+                    let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
                     
-                    ui.horizontal(|ui| {
-                        ui.add_space(20.0);
-                        
-                        // START TRAINING Button
-                        let button_size = egui::vec2(200.0, 40.0);
-                        let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
-                        
-                        let (fill_color, icon, text) = if self.is_training {
-                            (egui::Color32::from_rgb(255, 140, 0), "⏳", "TRAINING...")
-                        } else {
-                            (egui::Color32::from_rgb(40, 130, 50), "▶", "START TRAINING")
-                        };
-                        
-                        let fill_color = if response.hovered() && !self.is_training {
-                            egui::Color32::from_rgb(50, 140, 60)
-                        } else {
-                            fill_color
-                        };
-                        
-                        ui.painter().rect_filled(rect, 4.0, fill_color);
-                        
-                        let icon_galley = ui.painter().layout_no_wrap(
-                            icon.to_string(),
-                            egui::FontId::proportional(16.0),
-                            egui::Color32::WHITE,
-                        );
-                        let text_galley = ui.painter().layout_no_wrap(
-                            format!(" {}", text),
-                            egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())),
-                            egui::Color32::WHITE,
-                        );
-                        
-                        let total_width = icon_galley.size().x + text_galley.size().x;
-                        let start_x = rect.center().x - total_width / 2.0;
-                        let icon_pos = egui::pos2(
-                            start_x,
-                            rect.center().y - icon_galley.size().y / 2.0,
-                        );
-                        let text_pos = egui::pos2(
-                            start_x + icon_galley.size().x,
-                            rect.center().y - text_galley.size().y / 2.0,
-                        );
-                        
-                        ui.painter().galley(icon_pos, icon_galley, egui::Color32::WHITE);
-                        ui.painter().galley(text_pos, text_galley, egui::Color32::WHITE);
-                        
-                        if response.clicked() && !self.is_training {
-                            self.start_training();
-                        }
-                        
-                        ui.add_space(15.0);
-                        
-                        // PCA Button
-                        if !self.training_complete {
-                            let pca_button_size = egui::vec2(150.0, 40.0);
-                            let (pca_rect, pca_response) = ui.allocate_exact_size(pca_button_size, egui::Sense::click());
-                            let pca_color = if pca_response.hovered() {
-                                egui::Color32::from_rgb(30, 100, 130)
-                            } else {
-                                egui::Color32::from_rgb(15, 92, 112)
-                            };
-                            ui.painter().rect_filled(pca_rect, 4.0, pca_color);
-                            let pca_text = ui.painter().layout_no_wrap(
-                                "PCA".to_string(),
-                                egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())),
-                                egui::Color32::WHITE,
-                            );
-                            let pca_text_pos = egui::pos2(
-                                pca_rect.center().x - pca_text.size().x / 2.0,
-                                pca_rect.center().y - pca_text.size().y / 2.0,
-                            );
-                            ui.painter().galley(pca_text_pos, pca_text, egui::Color32::WHITE);
-                            if pca_response.clicked() {
-                                self.generate_pca_visualization();
-                            }
-                        }
-                        
-                        // Manage Data Button
-                        if !self.training_complete {
-                            let manage_button_size = egui::vec2(150.0, 40.0);
-                            let (manage_rect, manage_response) = ui.allocate_exact_size(manage_button_size, egui::Sense::click());
-                            let manage_color = if manage_response.hovered() {
-                                egui::Color32::from_rgb(120, 20, 20)
-                            } else {
-                                egui::Color32::from_rgb(100, 0, 0)
-                            };
-                            ui.painter().rect_filled(manage_rect, 4.0, manage_color);
-                            let manage_text = ui.painter().layout_no_wrap(
-                                "Manage Data".to_string(),
-                                egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())),
-                                egui::Color32::WHITE,
-                            );
-                            let manage_text_pos = egui::pos2(
-                                manage_rect.center().x - manage_text.size().x / 2.0,
-                                manage_rect.center().y - manage_text.size().y / 2.0,
-                            );
-                            ui.painter().galley(manage_text_pos, manage_text, egui::Color32::WHITE);
-                            if manage_response.clicked() {
-                                Self::open_file_explorer();
-                            }
-                        }
+                    let (fill_color, icon, text) = if self.is_training {
+                        (egui::Color32::from_rgb(255, 140, 0), "⏳", "TRAINING...")
+                    } else {
+                        (egui::Color32::from_rgb(40, 130, 50), "▶", "START TRAINING")
+                    };
+                    let fill_color = if response.hovered() && !self.is_training {
+                        egui::Color32::from_rgb(50, 140, 60)
+                    } else { fill_color };
+                    ui.painter().rect_filled(rect, 4.0, fill_color);
+                    let icon_galley = ui.painter().layout_no_wrap(
+                        icon.to_string(), egui::FontId::proportional(16.0), egui::Color32::WHITE);
+                    let text_galley = ui.painter().layout_no_wrap(
+                        format!(" {}", text),
+                        egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())),
+                        egui::Color32::WHITE);
+                    let total_width = icon_galley.size().x + text_galley.size().x;
+                    let start_x = rect.center().x - total_width / 2.0;
+                    ui.painter().galley(
+                        egui::pos2(start_x, rect.center().y - icon_galley.size().y / 2.0),
+                        icon_galley, egui::Color32::WHITE);
+                    ui.painter().galley(
+                        egui::pos2(start_x + {let icon_galley2 = ui.painter().layout_no_wrap(icon.to_string(), egui::FontId::proportional(16.0), egui::Color32::WHITE); icon_galley2.size().x},
+                            rect.center().y - text_galley.size().y / 2.0),
+                        text_galley, egui::Color32::WHITE);
+                    if response.clicked() && !self.is_training { self.start_training(); }
 
-                        // Predict Button
-                        let pred_size = egui::vec2(150.0, 40.0);
-                        let (pred_rect, pred_resp) = ui.allocate_exact_size(pred_size, egui::Sense::click());
-                        let pred_fill = if pred_resp.hovered() {
-                            egui::Color32::from_rgb(220, 120, 0)
-                        } else {
-                            egui::Color32::from_rgb(200, 100, 0)
-                        };
-                        ui.painter().rect_filled(pred_rect, 4.0, pred_fill);
-                        let pred_t = ui.painter().layout_no_wrap(
-                            "🔍 Predict".to_string(),
-                            egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())),
-                            egui::Color32::WHITE,
-                        );
-                        let pred_tp = egui::pos2(
-                            pred_rect.center().x - pred_t.size().x / 2.0,
-                            pred_rect.center().y - pred_t.size().y / 2.0,
-                        );
-                        ui.painter().galley(pred_tp, pred_t, egui::Color32::WHITE);
-                        if pred_resp.clicked() {
-                            std::thread::spawn(|| {
-                                let display = std::env::var("DISPLAY").unwrap_or("0".to_string());
-                                let binary_path = std::env::current_exe()
-                                    .ok()
-                                    .and_then(|p| p.parent().map(|d| d.join("predict_gui")))
-                                    .unwrap_or_else(|| std::path::PathBuf::from("./target/release/predict_gui"));
-                                if let Err(e) = Command::new(&binary_path)
-                                    .env("DISPLAY", display)
-                                    .env("LIBGL_ALWAYS_SOFTWARE", "1")
-                                    .env("GDK_BACKEND", "x11")
-                                    .spawn()
-                                {
-                                    eprintln!("[X] Failed to launch predict GUI: {}", e);
+                    ui.add_space(15.0);
+
+                    // PCA Button
+                    if !self.training_complete {
+                        let (pca_rect, pca_resp) = ui.allocate_exact_size(egui::vec2(150.0, 40.0), egui::Sense::click());
+                        let pca_color = if pca_resp.hovered() { egui::Color32::from_rgb(30,100,130) } else { egui::Color32::from_rgb(15,92,112) };
+                        ui.painter().rect_filled(pca_rect, 4.0, pca_color);
+                        let t = ui.painter().layout_no_wrap("PCA".into(), egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())), egui::Color32::WHITE);
+                        ui.painter().galley(egui::pos2(pca_rect.center().x - t.size().x/2.0, pca_rect.center().y - t.size().y/2.0), t, egui::Color32::WHITE);
+                        if pca_resp.clicked() { self.generate_pca_visualization(); }
+                        ui.add_space(15.0);
+                    }
+
+                    // Manage Data Button
+                    if !self.training_complete {
+                        let (mr, mresp) = ui.allocate_exact_size(egui::vec2(150.0, 40.0), egui::Sense::click());
+                        let mc = if mresp.hovered() { egui::Color32::from_rgb(120,20,20) } else { egui::Color32::from_rgb(100,0,0) };
+                        ui.painter().rect_filled(mr, 4.0, mc);
+                        let mt = ui.painter().layout_no_wrap("Manage Data".into(), egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())), egui::Color32::WHITE);
+                        ui.painter().galley(egui::pos2(mr.center().x - mt.size().x/2.0, mr.center().y - mt.size().y/2.0), mt, egui::Color32::WHITE);
+                        if mresp.clicked() { Self::open_file_explorer(); }
+                        ui.add_space(15.0);
+                    }
+
+                    // Predict Button
+                    let (pred_rect, pred_resp) = ui.allocate_exact_size(egui::vec2(150.0, 40.0), egui::Sense::click());
+                    let pred_fill = if pred_resp.hovered() { egui::Color32::from_rgb(220,120,0) } else { egui::Color32::from_rgb(200,100,0) };
+                    ui.painter().rect_filled(pred_rect, 4.0, pred_fill);
+                    let pt = ui.painter().layout_no_wrap("🔍 Predict".into(), egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())), egui::Color32::WHITE);
+                    ui.painter().galley(egui::pos2(pred_rect.center().x - pt.size().x/2.0, pred_rect.center().y - pt.size().y/2.0), pt, egui::Color32::WHITE);
+                    if pred_resp.clicked() {
+                        std::thread::spawn(|| {
+                            let display = std::env::var("DISPLAY").unwrap_or(":0".to_string());
+                            let bin_name = "predict_gui";
+                            let possible_paths = [
+                                format!("./target/release/{}",   bin_name),
+                                format!("target/release/{}",     bin_name),
+                                format!("./target/debug/{}",     bin_name),
+                                format!("target/debug/{}",       bin_name),
+                            ];
+                            let binary_path = possible_paths.iter()
+                                .find(|p| std::path::Path::new(p.as_str()).exists())
+                                .cloned()
+                                .or_else(|| {
+                                    std::env::current_exe().ok()
+                                        .and_then(|e| e.parent().map(|d| d.join(bin_name).to_string_lossy().into_owned()))
+                                });
+                            match binary_path {
+                                Some(path) => {
+                                    if let Err(e) = std::process::Command::new(&path)
+                                        .env("DISPLAY", display)
+                                        .env("LIBGL_ALWAYS_SOFTWARE", "1")
+                                        .env("GDK_BACKEND", "x11")
+                                        .spawn()
+                                    { eprintln!("[X] Failed to launch predict GUI: {}", e); }
                                 }
-                            });
-                        }
-                    });
-                    
-                    // Display elapsed time when training is complete
-                                       if self.training_complete {
+                                None => eprintln!("[X] predict GUI binary not found: {}", bin_name),
+                            }
+                        });
+                    }
+
+                    // Elapsed time (training complete)
+                    if self.training_complete {
                         if let Some(final_time) = self.final_time {
+                            ui.add_space(20.0);
                             let mins = (final_time / 60.0).floor() as i32;
                             let secs = (final_time % 60.0).floor() as i32;
-                            
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{}m {}s ({:.2}min)",
-                                        mins,
-                                        secs,
-                                        final_time / 60.0
-                                    ))
-                                    .size(16.0)
-                                    .color(egui::Color32::BLACK)
-                                    .family(egui::FontFamily::Name("PoppinsBold".into())),
-                                );
-                            });
+                            ui.label(egui::RichText::new(format!("✅ {}m {}s ({:.2}min)", mins, secs, final_time / 60.0))
+                                .size(15.0).color(egui::Color32::BLACK)
+                                .family(egui::FontFamily::Name("PoppinsBold".into())));
+                        }
+
+                        // PDF Report button
+                        ui.add_space(10.0);
+                        let pdf_size = egui::vec2(170.0, 40.0);
+                        let (pdf_rect, pdf_resp) = ui.allocate_exact_size(pdf_size, egui::Sense::click());
+                        let pdf_fill = if pdf_resp.hovered() {
+                            egui::Color32::from_rgb(50, 120, 200)
+                        } else {
+                            egui::Color32::from_rgb(20, 80, 160)
+                        };
+                        ui.painter().rect_filled(pdf_rect, 4.0, pdf_fill);
+                        let pdf_t = ui.painter().layout_no_wrap(
+                            "📄 PDF Report".to_string(),
+                            egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())),
+                            egui::Color32::WHITE,
+                        );
+                        ui.painter().galley(
+                            egui::pos2(
+                                pdf_rect.center().x - pdf_t.size().x / 2.0,
+                                pdf_rect.center().y - pdf_t.size().y / 2.0,
+                            ),
+                            pdf_t, egui::Color32::WHITE,
+                        );
+                        if pdf_resp.clicked() {
+                            self.save_pdf();
+                        }
+
+                        // PDF status label
+                        if let Some(ref status) = self.pdf_saved {
+                            ui.add_space(8.0);
+                            let (color, text) = if status.starts_with("PDF:") {
+                                (egui::Color32::from_rgb(20, 140, 60), status.as_str())
+                            } else {
+                                (egui::Color32::from_rgb(180, 30, 30), status.as_str())
+                            };
+                            ui.label(egui::RichText::new(text)
+                                .size(11.0)
+                                .color(color)
+                                .family(egui::FontFamily::Name("Poppins".into())));
                         }
                     }
                 });
             });
+
     }
 }
-
-
-
 impl TrainingGUI {
+    fn save_pdf(&mut self) {
+        let history = if let Ok(h) = self.metrics_history.lock() {
+            h.clone()
+        } else {
+            Vec::new()
+        };
+
+        let final_metrics: Vec<_> = history.iter().filter(|m| m.is_final).collect();
+        let n_epochs = final_metrics.len();
+
+        let accuracy_curve: Vec<(usize, f32, f32)> = final_metrics.iter().enumerate()
+            .map(|(i, m)| (i + 1, m.train_accuracy, m.val_accuracy))
+            .collect();
+        let loss_curve: Vec<(usize, f32, f32)> = final_metrics.iter().enumerate()
+            .map(|(i, m)| (i + 1, m.train_loss, m.val_loss))
+            .collect();
+
+        let (train_accuracy, val_accuracy, train_loss, val_loss) = if let Some(last) = final_metrics.last() {
+            (last.train_accuracy, last.val_accuracy, last.train_loss, last.val_loss)
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+
+        if let (Some(train_eval), Some(val_eval)) = (self.train_eval.clone(), self.val_eval.clone()) {
+            let report = TrainingReport::CNN {
+                train_eval,
+                val_eval,
+                train_accuracy,
+                val_accuracy,
+                train_loss,
+                val_loss,
+                n_epochs,
+                training_secs: self.final_time.unwrap_or(0.0),
+                accuracy_curve,
+                loss_curve,
+                power: self.power_monitor.as_ref()
+                           .and_then(|pm| pm.summary_from(self.training_start_sample)),
+            };
+            match generate_training_pdf(&report, "testing_results") {
+                Ok(path) => self.pdf_saved = Some(format!("PDF: {}", path)),
+                Err(e)   => self.pdf_saved = Some(format!("Error: {}", e)),
+            }
+        } else {
+            self.pdf_saved = Some("Error: Training results not available".to_string());
+        }
+    }
+
     fn draw_metrics_plot(&self, ui: &mut egui::Ui, is_train: bool) {
         let history = if let Ok(history) = self.metrics_history.lock() {
             history.clone()
         } else {
             Vec::new()
         };
-        
-        if history.is_empty() {
+
+        // Show live preview even before first epoch completes
+        let has_data = !history.is_empty() || self.live_preview.is_some();
+        if !has_data {
             ui.centered_and_justified(|ui| {
                 ui.label(egui::RichText::new("Waiting for training data...")
                     .family(egui::FontFamily::Name("Poppins".into())));
             });
             return;
         }
-        
-        let max_epoch = history.len() as f64;
-        
+
+        let next_x = (history.len() + 1) as f64;
+        let max_x = next_x.max(100.0);
+
         Plot::new(if is_train { "train_plot" } else { "val_plot" })
             .legend(Legend::default().position(Corner::RightBottom))
             .show_axes([true, true])
@@ -1463,43 +1464,62 @@ impl TrainingGUI {
             .height(200.0)
             .width(570.0)
             .include_x(0.0)
-            .include_x(max_epoch.min(100.0))
+            .include_x(max_x)
             .include_y(0.0)
             .include_y(1.0)
             .show(ui, |plot_ui| {
-                let epochs: Vec<f64> = (1..=history.len()).map(|i| i as f64).collect();
-                
-                let (loss_data, acc_data) = if is_train {
-                    (
-                        history.iter().map(|m| m.train_loss as f64).collect::<Vec<_>>(),
-                        history.iter().map(|m| m.train_accuracy as f64).collect::<Vec<_>>(),
-                    )
-                } else {
-                    (
-                        history.iter().map(|m| m.val_loss as f64).collect::<Vec<_>>(),
-                        history.iter().map(|m| m.val_accuracy as f64).collect::<Vec<_>>(),
-                    )
-                };
-                
-                let loss_points: PlotPoints = epochs.iter()
-                    .zip(loss_data.iter())
-                    .map(|(x, y)| [*x, *y])
-                    .collect();
-                
-                plot_ui.line(Line::new(loss_points)
-                    .color(egui::Color32::from_rgb(51, 102, 255))
-                    .width(2.0)
-                    .name("loss"));
-                
-                let acc_points: PlotPoints = epochs.iter()
-                    .zip(acc_data.iter())
-                    .map(|(x, y)| [*x, *y])
-                    .collect();
-                
-                plot_ui.line(Line::new(acc_points)
-                    .color(egui::Color32::from_rgb(255, 140, 0))
-                    .width(2.0)
-                    .name("accuracy"));
+                // Completed epoch lines
+                if !history.is_empty() {
+                    let epochs: Vec<f64> = (1..=history.len()).map(|i| i as f64).collect();
+
+                    let (loss_data, acc_data) = if is_train {
+                        (
+                            history.iter().map(|m| m.train_loss as f64).collect::<Vec<_>>(),
+                            history.iter().map(|m| m.train_accuracy as f64).collect::<Vec<_>>(),
+                        )
+                    } else {
+                        (
+                            history.iter().map(|m| m.val_loss as f64).collect::<Vec<_>>(),
+                            history.iter().map(|m| m.val_accuracy as f64).collect::<Vec<_>>(),
+                        )
+                    };
+
+                    let loss_points: PlotPoints = epochs.iter()
+                        .zip(loss_data.iter())
+                        .map(|(x, y)| [*x, *y])
+                        .collect();
+                    plot_ui.line(Line::new(loss_points)
+                        .color(egui::Color32::from_rgb(51, 102, 255))
+                        .width(2.0)
+                        .name("loss"));
+
+                    let acc_points: PlotPoints = epochs.iter()
+                        .zip(acc_data.iter())
+                        .map(|(x, y)| [*x, *y])
+                        .collect();
+                    plot_ui.line(Line::new(acc_points)
+                        .color(egui::Color32::from_rgb(255, 140, 0))
+                        .width(2.0)
+                        .name("accuracy"));
+                }
+
+                // Live intra-epoch preview dot (dashed, dimmer)
+                if let Some(ref preview) = self.live_preview {
+                    let (prev_loss, prev_acc) = if is_train {
+                        (preview.train_loss as f64, preview.train_accuracy as f64)
+                    } else {
+                        (preview.val_loss as f64, preview.val_accuracy as f64)
+                    };
+                    let x = next_x;
+                    plot_ui.line(Line::new(PlotPoints::new(vec![[x, prev_loss]]))
+                        .color(egui::Color32::from_rgba_unmultiplied(51, 102, 255, 120))
+                        .width(6.0)
+                        .name("loss (live)"));
+                    plot_ui.line(Line::new(PlotPoints::new(vec![[x, prev_acc]]))
+                        .color(egui::Color32::from_rgba_unmultiplied(255, 140, 0, 120))
+                        .width(6.0)
+                        .name("accuracy (live)"));
+                }
             });
     }
     

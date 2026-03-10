@@ -45,6 +45,8 @@ pub struct TrainingMetrics {
     pub train_accuracy: f32,
     pub val_loss: f32,
     pub val_accuracy: f32,
+    /// True = final end-of-epoch metric; False = intra-epoch live preview
+    pub is_final: bool,
 }
 
 // ✅ Tracker for both train and val
@@ -117,7 +119,7 @@ impl Trainer {
         train_labels: &Array1<i64>,
         val_data: &Array3<f32>,
         val_labels: &Array1<i64>,
-        progress_sender: Option<Sender<TrainingMetrics>>, // ← TAMBAHAN
+        progress_sender: Option<Sender<TrainingMetrics>>,
     ) -> Vec<TrainingMetrics> {
         let mut metrics_history = Vec::new();
         let mut early_stopping = EarlyStoppingTracker::new();
@@ -130,13 +132,24 @@ impl Trainer {
 
         let training_start = Instant::now();
 
+        // Keep last val metrics for intra-epoch preview updates
+        let mut last_val_loss = 1.0f32;
+        let mut last_val_accuracy = 0.0f32;
+
         for epoch in 0..self.config.num_epochs {
             let epoch_start = Instant::now();
 
-            // Train
+            // Train — send live batch progress to GUI
             let train_start = Instant::now();
             let (train_loss, train_accuracy) =
-                self.train_epoch(model, train_data, train_labels);
+                self.train_epoch_with_progress(
+                    model,
+                    train_data,
+                    train_labels,
+                    last_val_loss,
+                    last_val_accuracy,
+                    progress_sender.as_ref(),
+                );
             let train_time = train_start.elapsed();
 
             // Validate
@@ -145,6 +158,9 @@ impl Trainer {
                 self.evaluate(model, val_data, val_labels);
             let val_time = val_start.elapsed();
 
+            last_val_loss = val_loss;
+            last_val_accuracy = val_accuracy;
+
             let epoch_time = epoch_start.elapsed();
 
             let metrics = TrainingMetrics {
@@ -152,11 +168,12 @@ impl Trainer {
                 train_accuracy,
                 val_loss,
                 val_accuracy,
+                is_final: true,
             };
 
             metrics_history.push(metrics.clone());
 
-            // ✅ KIRIM KE GUI jika ada sender
+            // Send final per-epoch metrics (overrides any intra-epoch previews)
             if let Some(ref sender) = progress_sender {
                 let _ = sender.send(metrics.clone());
             }
@@ -164,7 +181,6 @@ impl Trainer {
             // Update tracker (silent) - check both train and val
             early_stopping.update(epoch, train_accuracy, val_accuracy, self.config.min_delta);
 
-            // ✅ Simple output (no warnings, no best info)
             println!(
                 "Epoch {:3}/{}: Train Loss: {:.4}, Acc: {:.2}% ({:.2}s) | Val Loss: {:.4}, Acc: {:.2}% ({:.2}s) | Total: {:.2}s",
                 epoch + 1,
@@ -177,7 +193,6 @@ impl Trainer {
                 val_time.as_secs_f32(),
                 epoch_time.as_secs_f32()
             );
-
 
             // ✅ ONLY CHECK: Stagnation for 25 epochs
             if early_stopping.epochs_without_improvement >= self.config.patience {
@@ -202,12 +217,88 @@ impl Trainer {
             );
         }
 
-        // ✅ Simplified statistics
         self.print_training_statistics(&metrics_history);
 
         metrics_history
     }
 
+    /// Like `train_epoch` but sends running-average metrics to the GUI every few batches.
+    fn train_epoch_with_progress(
+        &self,
+        model: &mut CoffeeCNN,
+        data: &Array3<f32>,
+        labels: &Array1<i64>,
+        last_val_loss: f32,
+        last_val_accuracy: f32,
+        sender: Option<&Sender<TrainingMetrics>>,
+    ) -> (f32, f32) {
+        let num_samples = data.shape()[0];
+        let num_batches =
+            (num_samples + self.config.batch_size - 1) / self.config.batch_size;
+
+        let mut total_loss = 0.0f32;
+        let mut total_correct = 0usize;
+        let mut batches_done = 0usize;
+
+        // Send a preview update every ~10% of batches (min 1)
+        let update_every = (num_batches / 10).max(1);
+
+        for batch_idx in 0..num_batches {
+            let start_idx = batch_idx * self.config.batch_size;
+            let end_idx = (start_idx + self.config.batch_size).min(num_samples);
+
+            let batch_data =
+                data.slice(ndarray::s![start_idx..end_idx, .., ..]).to_owned();
+            let batch_labels =
+                labels.slice(ndarray::s![start_idx..end_idx]).to_owned();
+
+            let (batch_loss, batch_accuracy) = model.train_step(
+                &batch_data,
+                &batch_labels,
+                self.config.learning_rate,
+            );
+
+            let batch_size = end_idx - start_idx;
+            total_loss += batch_loss * batch_size as f32;
+            total_correct += (batch_accuracy * batch_size as f32) as usize;
+            batches_done += 1;
+
+            // Print terminal progress every update_every batches
+            if batches_done % update_every == 0 || batches_done == num_batches {
+                let running_loss = total_loss / (batches_done * self.config.batch_size).min(num_samples) as f32;
+                let running_acc  = total_correct as f32 / (batches_done * self.config.batch_size).min(num_samples) as f32;
+                print!(
+                    "\r   Batch {}/{} — Loss: {:.4}  Acc: {:.1}%   ",
+                    batches_done, num_batches,
+                    running_loss, running_acc * 100.0,
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+
+            // Send running-average preview to GUI so graph updates during long epochs
+            if let Some(sender) = sender {
+                if batches_done % update_every == 0 {
+                    let running_loss = total_loss / (batches_done * self.config.batch_size).min(num_samples) as f32;
+                    let running_acc  = total_correct as f32 / (batches_done * self.config.batch_size).min(num_samples) as f32;
+                    let _ = sender.send(TrainingMetrics {
+                        train_loss: running_loss,
+                        train_accuracy: running_acc,
+                        val_loss: last_val_loss,
+                        val_accuracy: last_val_accuracy,
+                        is_final: false,
+                    });
+                }
+            }
+        }
+        println!(); // newline after the last \r progress line
+
+        let avg_loss = total_loss / num_samples as f32;
+        let avg_accuracy = total_correct as f32 / num_samples as f32;
+        (avg_loss, avg_accuracy)
+    }
+
+    #[allow(dead_code)]
     fn train_epoch(
         &self,
         model: &mut CoffeeCNN,

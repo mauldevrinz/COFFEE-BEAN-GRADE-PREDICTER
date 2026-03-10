@@ -49,6 +49,7 @@ struct RFResult {
 // ─────────────────────────────────────────────
 
 use image as image_crate;
+use coffee_classifier::report::{TrainingReport, generate_training_pdf};
 
 struct RFTrainingGUI {
     is_training: bool,
@@ -65,6 +66,7 @@ struct RFTrainingGUI {
     training_start_sample: usize,
     screenshot_requested: bool,
     screenshot_saved: Option<String>,
+    pdf_saved: Option<String>,
     total_trees: usize,
 
     // Data file panel
@@ -92,6 +94,7 @@ impl Default for RFTrainingGUI {
             training_start_sample: 0,
             screenshot_requested: false,
             screenshot_saved: None,
+            pdf_saved: None,
             total_trees: 100,
             high_grade_folders: Vec::new(),
             low_grade_folders: Vec::new(),
@@ -650,6 +653,27 @@ impl RFTrainingGUI {
     fn save_screenshot(&mut self) {
         self.screenshot_requested = true;
     }
+
+    fn save_pdf(&mut self) {
+        if let Some(ref result) = self.rf_result {
+            let report = TrainingReport::RandomForest {
+                train_eval:         result.train_eval.clone(),
+                val_eval:           result.val_eval.clone(),
+                train_accuracy:     result.train_accuracy,
+                val_accuracy:       result.val_accuracy,
+                n_trees:            result.n_trees,
+                feature_importance: result.feature_importance.clone(),
+                training_secs:      result.training_secs,
+                accuracy_curve:     result.accuracy_curve.clone(),
+                power:              self.power_monitor.as_ref()
+                                        .and_then(|pm| pm.summary_from(self.training_start_sample)),
+            };
+            match generate_training_pdf(&report, "testing_results") {
+                Ok(path)  => self.pdf_saved = Some(format!("PDF: {}", path)),
+                Err(e)    => self.pdf_saved = Some(format!("PDF Error: {}", e)),
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -773,6 +797,29 @@ impl eframe::App for RFTrainingGUI {
                         if dl_resp.clicked() {
                             self.save_screenshot();
                         }
+                        // ── PDF Report button ──
+                        ui.add_space(10.0);
+                        let pdf_size = egui::vec2(170.0, 40.0);
+                        let (pdf_rect, pdf_resp) = ui.allocate_exact_size(pdf_size, egui::Sense::click());
+                        let pdf_fill = if pdf_resp.hovered() {
+                            egui::Color32::from_rgb(140, 20, 20)
+                        } else {
+                            egui::Color32::from_rgb(110, 0, 0)
+                        };
+                        ui.painter().rect_filled(pdf_rect, 4.0, pdf_fill);
+                        let pdf_t = ui.painter().layout_no_wrap(
+                            "📄 PDF Report".to_string(),
+                            egui::FontId::new(15.0, egui::FontFamily::Name("PoppinsBold".into())),
+                            egui::Color32::WHITE,
+                        );
+                        let pdf_tp = egui::pos2(
+                            pdf_rect.center().x - pdf_t.size().x / 2.0,
+                            pdf_rect.center().y - pdf_t.size().y / 2.0,
+                        );
+                        ui.painter().galley(pdf_tp, pdf_t, egui::Color32::WHITE);
+                        if pdf_resp.clicked() {
+                            self.save_pdf();
+                        }
                     }
                     ui.add_space(15.0);
                     let pred_size = egui::vec2(150.0, 40.0);
@@ -796,18 +843,31 @@ impl eframe::App for RFTrainingGUI {
                     if pred_resp.clicked() {
                         std::thread::spawn(|| {
                             use std::process::Command;
-                            let display = std::env::var("DISPLAY").unwrap_or("0".to_string());
-                            let binary_path = std::env::current_exe()
-                                .ok()
-                                .and_then(|p| p.parent().map(|d| d.join("predict_rf_gui")))
-                                .unwrap_or_else(|| std::path::PathBuf::from("./target/release/predict_rf_gui"));
-                            if let Err(e) = Command::new(&binary_path)
-                                .env("DISPLAY", display)
-                                .env("LIBGL_ALWAYS_SOFTWARE", "1")
-                                .env("GDK_BACKEND", "x11")
-                                .spawn()
-                            {
-                                eprintln!("[X] Failed to launch predict GUI: {}", e);
+                            let display = std::env::var("DISPLAY").unwrap_or(":0".to_string());
+                            let bin_name = "predict_rf_gui";
+                            let possible_paths = [
+                                format!("./target/release/{}", bin_name),
+                                format!("target/release/{}", bin_name),
+                                format!("./target/debug/{}", bin_name),
+                                format!("target/debug/{}", bin_name),
+                            ];
+                            let binary_path = possible_paths.iter()
+                                .find(|p| std::path::Path::new(p.as_str()).exists())
+                                .cloned()
+                                .or_else(|| {
+                                    std::env::current_exe().ok()
+                                        .and_then(|e| e.parent().map(|d| d.join(bin_name).to_string_lossy().into_owned()))
+                                });
+                            match binary_path {
+                                Some(path) => {
+                                    if let Err(e) = Command::new(&path)
+                                        .env("DISPLAY", display)
+                                        .env("LIBGL_ALWAYS_SOFTWARE", "1")
+                                        .env("GDK_BACKEND", "x11")
+                                        .spawn()
+                                    { eprintln!("[X] Failed to launch predict GUI: {}", e); }
+                                }
+                                None => eprintln!("[X] predict GUI binary not found: {}", bin_name),
                             }
                         });
                     }
@@ -840,6 +900,13 @@ impl eframe::App for RFTrainingGUI {
                             let mins = (ft / 60.0).floor() as i32;
                             let secs = (ft % 60.0).floor() as i32;
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if let Some(ref msg) = self.pdf_saved {
+                                    ui.label(egui::RichText::new(msg.as_str())
+                                        .size(10.0)
+                                        .color(egui::Color32::from_rgb(120, 0, 0))
+                                        .family(egui::FontFamily::Name("Poppins".into())));
+                                    ui.add_space(10.0);
+                                }
                                 if let Some(ref msg) = self.screenshot_saved {
                                     ui.label(egui::RichText::new(msg.as_str())
                                         .size(11.0)

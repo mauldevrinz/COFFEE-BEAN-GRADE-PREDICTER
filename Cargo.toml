@@ -97,6 +97,9 @@ walkdir = "2.4"
 directories = "5.0"
 
 image = { version = "0.25", default-features = false, features = ["png"] }
+printpdf = "0.7"
 
 [profile.release]
-opt-level = 2
+opt-level = 3
+lto = "thin"
+codegen-units = 1

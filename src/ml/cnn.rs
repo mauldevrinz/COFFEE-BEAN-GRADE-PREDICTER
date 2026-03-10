@@ -1,6 +1,6 @@
 // src/cnn.rs - WITH TEMPERATURE SCALING FOR CALIBRATED CONFIDENCE
 
-use ndarray::{Array1, Array2, Array3};
+use ndarray::{Array1, Array2, Array3, s};
 use rand_distr::{Distribution, Normal};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -53,6 +53,8 @@ pub struct Conv1D {
     pub stride: usize,
     last_input: Option<Array3<f32>>,
     last_output: Option<Array3<f32>>,
+    // im2col matrix stored for backward pass: [batch, col_size, out_length]
+    last_col: Option<Array3<f32>>,
 }
 
 impl Conv1D {
@@ -76,76 +78,129 @@ impl Conv1D {
             stride: 1,
             last_input: None,
             last_output: None,
+            last_col: None,
         }
     }
     
     pub fn forward(&mut self, input: &Array3<f32>) -> Array3<f32> {
         self.last_input = Some(input.clone());
-        
-        let (batch_size, _, input_length) = input.dim();
-        let output_length = (input_length - self.kernel_size) / self.stride + 1;
-        let mut output = Array3::zeros((batch_size, self.out_channels, output_length));
-        
+
+        let (batch_size, in_ch, input_length) = input.dim();
+        let out_length = (input_length - self.kernel_size) / self.stride + 1;
+        let col_size = in_ch * self.kernel_size;
+
+        // Build im2col matrix: col[b, c*kernel+k, pos] = input[b, c, pos*stride+k]
+        // Shape: [batch, col_size, out_length]
+        let mut col = Array3::<f32>::zeros((batch_size, col_size, out_length));
         for b in 0..batch_size {
-            for out_c in 0..self.out_channels {
-                for pos in 0..output_length {
-                    let mut sum = self.bias[out_c];
-                    for in_c in 0..self.in_channels {
-                        for k in 0..self.kernel_size {
-                            let input_pos = pos * self.stride + k;
-                            sum += self.weights[[out_c, in_c, k]] * input[[b, in_c, input_pos]];
-                        }
+            for c in 0..in_ch {
+                for k in 0..self.kernel_size {
+                    let col_idx = c * self.kernel_size + k;
+                    for pos in 0..out_length {
+                        col[[b, col_idx, pos]] = input[[b, c, pos * self.stride + k]];
                     }
-                    output[[b, out_c, pos]] = relu(sum);
                 }
             }
         }
-        
+
+        // weights_2d: [out_ch, col_size]
+        let weights_2d = self.weights
+            .view()
+            .into_shape((self.out_channels, col_size))
+            .expect("Conv1D weight reshape failed");
+
+        // output = weights_2d · col[b] + bias, then ReLU
+        // weights_2d: [out_ch, col_size], col[b]: [col_size, out_length] → [out_ch, out_length]
+        let mut output = Array3::<f32>::zeros((batch_size, self.out_channels, out_length));
+        for b in 0..batch_size {
+            let col_b = col.slice(s![b, .., ..]);           // [col_size, out_length]
+            let out_b = weights_2d.dot(&col_b);             // [out_ch, out_length]
+            for oc in 0..self.out_channels {
+                for pos in 0..out_length {
+                    output[[b, oc, pos]] = relu(out_b[[oc, pos]] + self.bias[oc]);
+                }
+            }
+        }
+
         self.last_output = Some(output.clone());
+        self.last_col = Some(col);
         output
     }
     
     pub fn backward(&mut self, grad_output: &Array3<f32>, learning_rate: f32) -> Array3<f32> {
         let input = self.last_input.as_ref().unwrap();
         let output = self.last_output.as_ref().unwrap();
-        
-        let (batch_size, _, _input_length) = input.dim();
-        let output_length = grad_output.shape()[2];
-        
-        let mut grad_input: Array3<f32> = Array3::zeros(input.dim());
-        let mut grad_weights: Array3<f32> = Array3::zeros(self.weights.dim());
-        let mut grad_bias: Array1<f32> = Array1::zeros(self.out_channels);
-        
+        let col = self.last_col.as_ref().unwrap();
+
+        let (batch_size, in_ch, _input_length) = input.dim();
+        let out_length = grad_output.shape()[2];
+        let col_size = in_ch * self.kernel_size;
+
+        // Apply ReLU gradient: zero out positions where output ≤ 0
+        let mut grad_relu = grad_output.clone();
         for b in 0..batch_size {
-            for out_c in 0..self.out_channels {
-                for pos in 0..output_length {
-                    let relu_grad = if output[[b, out_c, pos]] > 0.0 { 1.0 } else { 0.0 };
-                    let grad = grad_output[[b, out_c, pos]] * relu_grad;
-                    
-                    grad_bias[out_c] += grad;
-                    
-                    for in_c in 0..self.in_channels {
-                        for k in 0..self.kernel_size {
-                            let input_pos = pos * self.stride + k;
-                            grad_weights[[out_c, in_c, k]] += grad * input[[b, in_c, input_pos]];
-                            grad_input[[b, in_c, input_pos]] += grad * self.weights[[out_c, in_c, k]];
-                        }
+            for oc in 0..self.out_channels {
+                for pos in 0..out_length {
+                    if output[[b, oc, pos]] <= 0.0 {
+                        grad_relu[[b, oc, pos]] = 0.0;
                     }
                 }
             }
         }
-        
-        for out_c in 0..self.out_channels {
-            for in_c in 0..self.in_channels {
+
+        let weights_2d = self.weights
+            .view()
+            .into_shape((self.out_channels, col_size))
+            .expect("Conv1D weight reshape failed");
+
+        // Accumulate grad_weights and grad_col across the batch using matrix multiply
+        // grad_w += grad_relu[b] · col[b].T  →  [out_ch, out_length] · [out_length, col_size] = [out_ch, col_size]
+        // grad_col[b] = weights_2d.T · grad_relu[b]  →  [col_size, out_ch] · [out_ch, out_length] = [col_size, out_length]
+        let mut grad_weights_2d = Array2::<f32>::zeros((self.out_channels, col_size));
+        let mut grad_bias = Array1::<f32>::zeros(self.out_channels);
+        let mut grad_col = Array3::<f32>::zeros(col.dim());
+
+        for b in 0..batch_size {
+            let grad_b = grad_relu.slice(s![b, .., ..]); // [out_ch, out_length]
+            let col_b  = col.slice(s![b, .., ..]);        // [col_size, out_length]
+
+            grad_weights_2d += &grad_b.dot(&col_b.t());  // [out_ch, col_size]
+            let gc_b = weights_2d.t().dot(&grad_b);       // [col_size, out_length]
+            grad_col.slice_mut(s![b, .., ..]).assign(&gc_b);
+
+            for oc in 0..self.out_channels {
+                grad_bias[oc] += grad_b.slice(s![oc, ..]).sum();
+            }
+        }
+
+        // Average over batch and update weights with gradient clipping
+        grad_weights_2d /= batch_size as f32;
+        grad_bias /= batch_size as f32;
+
+        let mut weights_2d_mut = self.weights
+            .view_mut()
+            .into_shape((self.out_channels, col_size))
+            .expect("Conv1D weight reshape (mut) failed");
+        for oc in 0..self.out_channels {
+            for ci in 0..col_size {
+                weights_2d_mut[[oc, ci]] -= learning_rate * grad_weights_2d[[oc, ci]].clamp(-10.0, 10.0);
+            }
+            self.bias[oc] -= learning_rate * grad_bias[oc].clamp(-10.0, 10.0);
+        }
+
+        // col2im: scatter grad_col back into grad_input
+        let mut grad_input = Array3::<f32>::zeros(input.dim());
+        for b in 0..batch_size {
+            for c in 0..in_ch {
                 for k in 0..self.kernel_size {
-                    let avg_grad: f32 = grad_weights[[out_c, in_c, k]] / batch_size as f32;
-                    self.weights[[out_c, in_c, k]] -= learning_rate * avg_grad.clamp(-10.0, 10.0);
+                    let col_idx = c * self.kernel_size + k;
+                    for pos in 0..out_length {
+                        grad_input[[b, c, pos * self.stride + k]] += grad_col[[b, col_idx, pos]];
+                    }
                 }
             }
-            let avg_bias_grad: f32 = grad_bias[out_c] / batch_size as f32;
-            self.bias[out_c] -= learning_rate * avg_bias_grad.clamp(-10.0, 10.0);
         }
-        
+
         grad_input
     }
 }
