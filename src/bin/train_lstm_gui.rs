@@ -4,7 +4,7 @@
 
 use coffee_classifier::ml::*;
 use coffee_classifier::ml::evaluation::EvaluationResults;
-use coffee_classifier::power_monitor::{PowerMonitor, PowerSummary};
+use coffee_classifier::power_monitor::PowerMonitor;
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints, Legend, Corner};
 use std::sync::atomic::{AtomicUsize, Ordering};

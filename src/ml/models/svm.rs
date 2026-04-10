@@ -460,7 +460,7 @@ impl CoffeeSVM {
         let mut final_loss = 0.0f32;
 
         // Checkpoints: setiap 10% epoch
-        let checkpoint_interval = (n_epochs / 10).max(1);
+        let _checkpoint_interval = (n_epochs / 10).max(1);
 
         for epoch in 0..n_epochs {
             self.shuffle_indices(&mut indices);
@@ -504,8 +504,8 @@ impl CoffeeSVM {
             final_loss = epoch_loss / n_samples as f32;
             progress_callback(epoch + 1, n_epochs);
 
-            // Simpan checkpoint accuracy
-            if (epoch + 1) % checkpoint_interval == 0 || epoch + 1 == n_epochs {
+            // Simpan checkpoint accuracy (setiap 5 epoch, max 100)
+            if epoch + 1 <= 100 && ((epoch + 1) % 5 == 1 || epoch + 1 == n_epochs) {
                 let train_preds = self.predict_from_matrix(&train_norm);
                 let train_correct = train_preds.iter().zip(train_labels.iter()).filter(|(p, l)| p == l).count();
                 let train_acc = train_correct as f32 / n_samples as f32;

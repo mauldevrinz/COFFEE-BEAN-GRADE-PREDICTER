@@ -358,7 +358,7 @@ impl CoffeeMLP {
         let batch_size = self.config.batch_size.min(n_train);
         let lr         = self.config.learning_rate;
         let clip       = self.config.clip_grad;
-        let checkpoint = (n_epochs / 10).max(1);
+        let _checkpoint = (n_epochs / 10).max(1);
 
         let mut indices: Vec<usize> = (0..n_train).collect();
         let mut accuracy_curve: Vec<(usize, f32, f32)> = Vec::new();
@@ -389,7 +389,7 @@ impl CoffeeMLP {
 
             progress_callback(epoch + 1, n_epochs);
 
-            if (epoch + 1) % checkpoint == 0 || epoch + 1 == n_epochs {
+            if epoch + 1 <= 100 && ((epoch + 1) % 5 == 1 || epoch + 1 == n_epochs) {
                 // Val accuracy
                 let val_correct: usize = val_inputs.iter().zip(val_lbls.iter()).filter(|(x, &l)| {
                     let (_, o1) = self.layer1.forward(&[(*x).clone()]);

@@ -417,7 +417,7 @@ impl CoffeeLSTM {
 
         let mut accuracy_curve: Vec<(usize, f32, f32)> = Vec::new();
         let mut loss_curve: Vec<(usize, f32, f32)> = Vec::new();
-        let checkpoint_interval = (n_epochs / 10).max(1);
+        let _checkpoint_interval = (n_epochs / 10).max(1);
 
         let mut indices: Vec<usize> = (0..n_train).collect();
         let mut final_train_loss = 0.0f32;
@@ -555,8 +555,8 @@ impl CoffeeLSTM {
 
             progress_callback(epoch + 1, n_epochs);
 
-            // Checkpoint accuracy and loss
-            if (epoch + 1) % checkpoint_interval == 0 || epoch + 1 == n_epochs {
+            // Checkpoint accuracy and loss (setiap 5 epoch, max 100)
+            if epoch + 1 <= 100 && ((epoch + 1) % 5 == 1 || epoch + 1 == n_epochs) {
                 let val_acc = self.eval_accuracy(val_data, val_labels, effective_t, stride);
                 let val_loss = self.eval_loss(val_data, val_labels, effective_t, stride);
                 accuracy_curve.push((epoch + 1, final_train_acc, val_acc));

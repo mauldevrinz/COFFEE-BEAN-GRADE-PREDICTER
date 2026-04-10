@@ -181,7 +181,7 @@ fn aw(text: &str, size: f32) -> f32 {
     text.chars().count() as f32 * size * 0.55 * 0.3528
 }
 
-/// Unix timestamp → "YYYY-MM-DD HH:MM:SS"
+/// Unix timestamp to "YYYY-MM-DD HH:MM:SS"
 fn unix_to_date(ts: u64) -> String {
     let h = (ts % 86400) / 3600;
     let m = (ts % 3600) / 60;
@@ -207,6 +207,7 @@ fn unix_to_date(ts: u64) -> String {
 }
 
 /// Select up to `n` evenly-spaced indices (always includes first and last).
+#[allow(dead_code)]
 fn sample_indices(len: usize, n: usize) -> Vec<usize> {
     if len == 0 { return vec![]; }
     if len <= n  { return (0..len).collect(); }
@@ -334,7 +335,7 @@ fn metric_box(l: &PdfLayerReference,
 fn eval_table(l: &PdfLayerReference,
               f: &IndirectFontRef, fb: &IndirectFontRef,
               eval: &EvaluationResults, label: &str, y: f32) -> f32 {
-    let heading = format!("{} — Accuracy: {:.2}%", label, eval.accuracy * 100.0);
+    let heading = format!("{} - Accuracy: {:.2}%", label, eval.accuracy * 100.0);
     let y0 = section_title(l, fb, &heading, y);
     let cw = [48.0f32, 66.0, 66.0];
     let tw: f32 = cw.iter().sum();
@@ -386,7 +387,7 @@ fn eval_table(l: &PdfLayerReference,
     ry - 4.0
 }
 
-/// 2×2 confusion matrix. Returns Y below.
+/// 2x2 confusion matrix. Returns Y below.
 fn confusion_matrix_grid(l: &PdfLayerReference,
                          f: &IndirectFontRef, fb: &IndirectFontRef,
                          matrix: [[usize; 2]; 2], y: f32) -> f32 {
@@ -509,35 +510,94 @@ fn kv_table(l: &PdfLayerReference,
     y - rh * rows.len() as f32 - 4.0
 }
 
-/// Accuracy vs X curve table. Returns Y below.
-fn accuracy_curve_table(l: &PdfLayerReference,
-                        f: &IndirectFontRef, fb: &IndirectFontRef,
-                        x_label: &str, curve: &[(usize, f32, f32)], y: f32) -> f32 {
+/// Accuracy checkpoint table (10% interval sampling). Returns Y below.
+fn accuracy_checkpoint_table(l: &PdfLayerReference,
+                             f: &IndirectFontRef, fb: &IndirectFontRef,
+                             x_label: &str, curve: &[(usize, f32, f32)], y: f32) -> f32 {
     if curve.is_empty() { return y; }
     let y0 = section_title(l, fb, "Accuracy Curve (Checkpoint)", y);
     let widths = [28.0f32, 76.0, 76.0];
     let hdrs = [x_label, "Training Accuracy (%)", "Validation Accuracy (%)"];
-    let idxs = sample_indices(curve.len(), 10);
-    let rows: Vec<Vec<String>> = idxs.iter().map(|&i| {
-        let (x, ta, va) = curve[i];
-        vec![format!("{}", x), format!("{:.2}", ta * 100.0), format!("{:.2}", va * 100.0)]
-    }).collect();
+    
+    // Limit to max 100 epochs
+    let _max_epoch = curve.iter().map(|(x, _, _)| *x).max().unwrap_or(1);
+    let filtered_curve: Vec<_> = curve.iter()
+        .filter(|(x, _, _)| *x <= 100)
+        .collect();
+    
+    if filtered_curve.is_empty() { return y0 - 5.0; }
+    
+    // Take every 5 epochs (checkpoint sampling)
+    let rows: Vec<Vec<String>> = filtered_curve.iter()
+        .filter(|(epoch, _, _)| epoch % 5 == 1 || *epoch == 100)
+        .map(|(x, ta, va)| {
+            vec![format!("{}", x), format!("{:.2}", ta * 100.0), format!("{:.2}", va * 100.0)]
+        })
+        .collect();
+    
     ranked_table(l, f, fb, &hdrs, &widths, &rows, None, y0)
 }
 
-/// Loss curve table. Returns Y below.
-fn loss_curve_table(l: &PdfLayerReference,
-                    f: &IndirectFontRef, fb: &IndirectFontRef,
-                    curve: &[(usize, f32, f32)], y: f32) -> f32 {
+/// Accuracy vs X curve table. Returns Y below.
+#[allow(dead_code)]
+fn accuracy_curve_table(l: &PdfLayerReference,
+                        f: &IndirectFontRef, fb: &IndirectFontRef,
+                        x_label: &str, curve: &[(usize, f32, f32)], y: f32) -> f32 {
+    if curve.is_empty() { return y; }
+    let y0 = section_title(l, fb, "Accuracy Curve (All Epochs)", y);
+    let widths = [28.0f32, 76.0, 76.0];
+    let hdrs = [x_label, "Training Accuracy (%)", "Validation Accuracy (%)"];
+    // Limit to first 100 epochs
+    let rows: Vec<Vec<String>> = curve.iter()
+        .filter(|(x, _, _)| *x <= 100)
+        .map(|(x, ta, va)| {
+            vec![format!("{}", x), format!("{:.2}", ta * 100.0), format!("{:.2}", va * 100.0)]
+        }).collect();
+    ranked_table(l, f, fb, &hdrs, &widths, &rows, None, y0)
+}
+
+/// Loss checkpoint curve table (10% interval sampling). Returns Y below.
+fn loss_checkpoint_table(l: &PdfLayerReference,
+                         f: &IndirectFontRef, fb: &IndirectFontRef,
+                         curve: &[(usize, f32, f32)], y: f32) -> f32 {
     if curve.is_empty() { return y; }
     let y0 = section_title(l, fb, "Loss Curve (Checkpoint)", y);
     let widths = [28.0f32, 76.0, 76.0];
     let hdrs = ["Epoch", "Training Loss", "Validation Loss"];
-    let idxs = sample_indices(curve.len(), 10);
-    let rows: Vec<Vec<String>> = idxs.iter().map(|&i| {
-        let (ep, tl, vl) = curve[i];
-        vec![format!("{}", ep), format!("{:.6}", tl), format!("{:.6}", vl)]
-    }).collect();
+    
+    // Limit to max 100 epochs
+    let filtered_curve: Vec<_> = curve.iter()
+        .filter(|(ep, _, _)| *ep <= 100)
+        .collect();
+    
+    if filtered_curve.is_empty() { return y0 - 5.0; }
+    
+    // Take every 5 epochs (checkpoint sampling)
+    let rows: Vec<Vec<String>> = filtered_curve.iter()
+        .filter(|(epoch, _, _)| epoch % 5 == 1 || *epoch == 100)
+        .map(|(ep, tl, vl)| {
+            vec![format!("{}", ep), format!("{:.6}", tl), format!("{:.6}", vl)]
+        })
+        .collect();
+    
+    ranked_table(l, f, fb, &hdrs, &widths, &rows, None, y0)
+}
+
+/// Loss curve table. Returns Y below.
+#[allow(dead_code)]
+fn loss_curve_table(l: &PdfLayerReference,
+                    f: &IndirectFontRef, fb: &IndirectFontRef,
+                    curve: &[(usize, f32, f32)], y: f32) -> f32 {
+    if curve.is_empty() { return y; }
+    let y0 = section_title(l, fb, "Loss Curve (All Epochs)", y);
+    let widths = [28.0f32, 76.0, 76.0];
+    let hdrs = ["Epoch", "Training Loss", "Validation Loss"];
+    // Limit to first 100 epochs
+    let rows: Vec<Vec<String>> = curve.iter()
+        .filter(|(ep, _, _)| *ep <= 100)
+        .map(|(ep, tl, vl)| {
+            vec![format!("{}", ep), format!("{:.6}", tl), format!("{:.6}", vl)]
+        }).collect();
     ranked_table(l, f, fb, &hdrs, &widths, &rows, None, y0)
 }
 
@@ -550,7 +610,7 @@ fn draw_power_section(l: &PdfLayerReference,
     let y0 = section_title(l, fb, "POWER CONSUMPTION DURING TRAINING", y);
     let y0 = y0 - 2.0;
 
-    // 4-row × 4-column layout: [label | value | label | value]
+    // 4-row x 4-column layout: [label | value | label | value]
     let cw = [62.0f32, 28.0, 62.0, 28.0];
     let tw: f32 = cw.iter().sum(); // = 180 mm = CW
     let rh = 7.5f32;
@@ -564,9 +624,9 @@ fn draw_power_section(l: &PdfLayerReference,
 
     let rows: [(&str, String, &str, String); 4] = [
         ("Avg Total Power",    format!("{:.2} W",   ps.avg_total_w),
-         "Avg CPU Temp",       format!("{:.1} °C",  ps.avg_cpu_temp)),
+         "Avg CPU Temp",       format!("{:.1} C",  ps.avg_cpu_temp)),
         ("Peak Total Power",   format!("{:.2} W",   ps.peak_total_w),
-         "Peak CPU Temp",      format!("{:.1} °C",  ps.peak_cpu_temp)),
+         "Peak CPU Temp",      format!("{:.1} C",  ps.peak_cpu_temp)),
         ("Avg CPU+GPU Power",  format!("{:.2} W",   ps.avg_cpu_gpu_w),
          "Energy Used",        format!("{:.1} J  ({:.4} Wh)", ps.energy_joules, energy_wh)),
         ("Peak CPU+GPU Power", format!("{:.2} W",   ps.peak_cpu_gpu_w),
@@ -628,7 +688,8 @@ fn draw_page1(l: &PdfLayerReference,
     let bw = (CW - 10.0) / 3.0;
     let bh = 26.0;
     let secs = report.training_secs();
-    let time_str = if secs < 60.0 { format!("{:.1}s", secs) } else { format!("{:.1}min", secs / 60.0) };
+    let time_ms = secs * 1000.0;
+    let time_str = format!("{:.2} ms", time_ms);
     metric_box(l, f, fb, ML,                    y, bw, bh, "Training Accuracy",
                &format!("{:.1}%", report.train_accuracy() * 100.0), c_dark_green());
     metric_box(l, f, fb, ML + bw + 5.0,         y, bw, bh, "Validation Accuracy",
@@ -701,7 +762,7 @@ fn draw_page1(l: &PdfLayerReference,
         txt(l, s, 8.5, bx + 3.0, by - 5.5, fb, c_white());
     }
 
-    // Power section — rendered below the sensors if data is available
+    // Power section - rendered below the sensors if data is available
     let y_after_sensors = y3 - 28.0; // 2 sensor rows (10mm each) + 8mm gap
     if let Some(ps) = report.power() {
         draw_power_section(l, f, fb, ps, y_after_sensors);
@@ -730,9 +791,22 @@ fn draw_page3(l: &PdfLayerReference,
     let mut y = PH - 25.0;
 
     match report {
-        TrainingReport::RandomForest { n_trees, feature_importance, accuracy_curve, .. } => {
+        TrainingReport::RandomForest { n_trees, train_accuracy, val_accuracy, training_secs,
+                                       feature_importance, accuracy_curve, .. } => {
+            y = section_title(l, fb, &format!("Random Forest Summary -- {} Trees", n_trees), y);
+            y -= 2.0;
+            let training_ms = training_secs * 1000.0;
+            let summary = [
+                ("Training Accuracy",   format!("{:.6}", train_accuracy)),
+                ("Validation Accuracy", format!("{:.6}", val_accuracy)),
+                ("Total Trees",         format!("{}", n_trees)),
+                ("Training Time",       format!("{:.2} ms", training_ms)),
+            ];
+            y = kv_table(l, f, fb, &summary, y);
+            y -= 6.0;
+            
             y = section_title(l, fb,
-                &format!("Feature Importance -- {} Trees (Top 15)", n_trees), y);
+                &format!("Feature Importance (Top 15)", ), y);
             y -= 2.0;
             let max_imp = feature_importance.iter().map(|(_, v)| *v).fold(0.0f32, f32::max);
             let hdrs = ["No", "Feature Name", "Score (proportional bar)"];
@@ -743,10 +817,11 @@ fn draw_page3(l: &PdfLayerReference,
                 }).collect();
             y = ranked_table(l, f, fb, &hdrs, &widths, &rows, Some((2, max_imp)), y);
             y -= 6.0;
-            accuracy_curve_table(l, f, fb, "N Trees", accuracy_curve, y);
+            accuracy_checkpoint_table(l, f, fb, "N Trees", accuracy_curve, y);
         }
 
-        TrainingReport::MLP { n_epochs, train_loss, val_loss, accuracy_curve, loss_curve, .. } => {
+        TrainingReport::MLP { n_epochs, train_loss, val_loss, training_secs: _,
+                              accuracy_curve, loss_curve, .. } => {
             y = section_title(l, fb, &format!("MLP Summary -- {} Epochs", n_epochs), y);
             y -= 2.0;
             let summary = [
@@ -756,19 +831,19 @@ fn draw_page3(l: &PdfLayerReference,
             ];
             y = kv_table(l, f, fb, &summary, y);
             y -= 6.0;
-            y = accuracy_curve_table(l, f, fb, "Epoch", accuracy_curve, y);
+            y = accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
             y -= 6.0;
-            loss_curve_table(l, f, fb, loss_curve, y);
+            loss_checkpoint_table(l, f, fb, loss_curve, y);
         }
 
-        TrainingReport::SVM { n_epochs, n_support_vectors, final_loss,
+        TrainingReport::SVM { n_epochs, n_support_vectors, final_loss, training_secs: _,
                               weight_magnitudes, accuracy_curve, .. } => {
             y = section_title(l, fb, &format!("SVM Summary -- {} Epochs", n_epochs), y);
             y -= 2.0;
             let summary = [
-                ("Support Vectors",    format!("{}", n_support_vectors)),
-                ("Final Training Loss", format!("{:.6}", final_loss)),
-                ("Total Epochs",        format!("{}", n_epochs)),
+                ("Train Loss",      format!("{:.6}", final_loss)),
+                ("Support Vectors", format!("{}", n_support_vectors)),
+                ("Total Epochs",    format!("{}", n_epochs)),
             ];
             y = kv_table(l, f, fb, &summary, y);
             y -= 6.0;
@@ -786,10 +861,11 @@ fn draw_page3(l: &PdfLayerReference,
                 y = ranked_table(l, f, fb, &hdrs, &widths, &rows, Some((2, max_w)), y);
                 y -= 6.0;
             }
-            accuracy_curve_table(l, f, fb, "Epoch", accuracy_curve, y);
+            accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
         }
 
-        TrainingReport::LSTM { n_epochs, train_loss, val_loss, accuracy_curve, loss_curve, .. } => {
+        TrainingReport::LSTM { n_epochs, train_loss, val_loss, training_secs: _,
+                               accuracy_curve, loss_curve, .. } => {
             y = section_title(l, fb, &format!("LSTM Summary -- {} Epochs", n_epochs), y);
             y -= 2.0;
             let summary = [
@@ -799,12 +875,13 @@ fn draw_page3(l: &PdfLayerReference,
             ];
             y = kv_table(l, f, fb, &summary, y);
             y -= 6.0;
-            y = accuracy_curve_table(l, f, fb, "Epoch", accuracy_curve, y);
+            y = accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
             y -= 6.0;
-            loss_curve_table(l, f, fb, loss_curve, y);
+            loss_checkpoint_table(l, f, fb, loss_curve, y);
         }
 
-        TrainingReport::CNN { n_epochs, train_loss, val_loss, accuracy_curve, loss_curve, .. } => {
+        TrainingReport::CNN { n_epochs, train_loss, val_loss, training_secs: _,
+                              accuracy_curve, loss_curve, .. } => {
             y = section_title(l, fb, &format!("1D-CNN Summary -- {} Epochs", n_epochs), y);
             y -= 2.0;
             let summary = [
@@ -814,9 +891,9 @@ fn draw_page3(l: &PdfLayerReference,
             ];
             y = kv_table(l, f, fb, &summary, y);
             y -= 6.0;
-            y = accuracy_curve_table(l, f, fb, "Epoch", accuracy_curve, y);
+            y = accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
             y -= 6.0;
-            loss_curve_table(l, f, fb, loss_curve, y);
+            loss_checkpoint_table(l, f, fb, loss_curve, y);
         }
     }
 
