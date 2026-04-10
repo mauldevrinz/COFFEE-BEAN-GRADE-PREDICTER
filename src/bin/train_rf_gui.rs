@@ -662,7 +662,6 @@ impl RFTrainingGUI {
                 train_accuracy:     result.train_accuracy,
                 val_accuracy:       result.val_accuracy,
                 n_trees:            result.n_trees,
-                feature_importance: result.feature_importance.clone(),
                 training_secs:      result.training_secs,
                 accuracy_curve:     result.accuracy_curve.clone(),
                 power:              self.power_monitor.as_ref()

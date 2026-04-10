@@ -645,7 +645,6 @@ impl SVMTrainingGUI {
                 val_accuracy:       result.val_accuracy,
                 n_epochs:           result.n_epochs,
                 n_support_vectors:  result.n_support_vectors,
-                weight_magnitudes:  result.weight_magnitudes.clone(),
                 training_secs:      result.training_secs,
                 final_loss:         result.final_loss,
                 accuracy_curve:     result.accuracy_curve.clone(),

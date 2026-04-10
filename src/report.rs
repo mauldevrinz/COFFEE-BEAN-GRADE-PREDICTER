@@ -40,7 +40,6 @@ pub enum TrainingReport {
         train_accuracy:     f32,
         val_accuracy:       f32,
         n_trees:            usize,
-        feature_importance: Vec<(String, f32)>,
         training_secs:      f64,
         accuracy_curve:     Vec<(usize, f32, f32)>,
         power:              Option<PowerSummary>,
@@ -65,7 +64,6 @@ pub enum TrainingReport {
         val_accuracy:       f32,
         n_epochs:           usize,
         n_support_vectors:  usize,
-        weight_magnitudes:  Vec<(String, f32)>,
         training_secs:      f64,
         final_loss:         f32,
         accuracy_curve:     Vec<(usize, f32, f32)>,
@@ -792,7 +790,7 @@ fn draw_page3(l: &PdfLayerReference,
 
     match report {
         TrainingReport::RandomForest { n_trees, train_accuracy, val_accuracy, training_secs,
-                                       feature_importance, accuracy_curve, .. } => {
+                                       accuracy_curve, .. } => {
             y = section_title(l, fb, &format!("Random Forest Summary -- {} Trees", n_trees), y);
             y -= 2.0;
             let training_ms = training_secs * 1000.0;
@@ -805,18 +803,6 @@ fn draw_page3(l: &PdfLayerReference,
             y = kv_table(l, f, fb, &summary, y);
             y -= 6.0;
             
-            y = section_title(l, fb,
-                &format!("Feature Importance (Top 15)", ), y);
-            y -= 2.0;
-            let max_imp = feature_importance.iter().map(|(_, v)| *v).fold(0.0f32, f32::max);
-            let hdrs = ["No", "Feature Name", "Score (proportional bar)"];
-            let widths = [12.0f32, 90.0, 78.0];
-            let rows: Vec<Vec<String>> = feature_importance.iter().take(15).enumerate()
-                .map(|(i, (name, score))| {
-                    vec![format!("{}", i + 1), name.clone(), format!("{}", score)]
-                }).collect();
-            y = ranked_table(l, f, fb, &hdrs, &widths, &rows, Some((2, max_imp)), y);
-            y -= 6.0;
             accuracy_checkpoint_table(l, f, fb, "N Trees", accuracy_curve, y);
         }
 
@@ -837,7 +823,7 @@ fn draw_page3(l: &PdfLayerReference,
         }
 
         TrainingReport::SVM { n_epochs, n_support_vectors, final_loss, training_secs: _,
-                              weight_magnitudes, accuracy_curve, .. } => {
+                              accuracy_curve, .. } => {
             y = section_title(l, fb, &format!("SVM Summary -- {} Epochs", n_epochs), y);
             y -= 2.0;
             let summary = [
@@ -848,19 +834,6 @@ fn draw_page3(l: &PdfLayerReference,
             y = kv_table(l, f, fb, &summary, y);
             y -= 6.0;
 
-            if !weight_magnitudes.is_empty() {
-                y = section_title(l, fb, "Feature Weights (Weight Magnitudes -- Top 15)", y);
-                y -= 2.0;
-                let max_w = weight_magnitudes.iter().map(|(_, v)| *v).fold(0.0f32, f32::max);
-                let hdrs = ["No", "Feature Name", "Weight (proportional bar)"];
-                let widths = [12.0f32, 90.0, 78.0];
-                let rows: Vec<Vec<String>> = weight_magnitudes.iter().take(15).enumerate()
-                    .map(|(i, (name, mag))| {
-                        vec![format!("{}", i + 1), name.clone(), format!("{}", mag)]
-                    }).collect();
-                y = ranked_table(l, f, fb, &hdrs, &widths, &rows, Some((2, max_w)), y);
-                y -= 6.0;
-            }
             accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
         }
 
