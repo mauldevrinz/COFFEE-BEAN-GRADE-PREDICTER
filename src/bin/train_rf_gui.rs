@@ -354,7 +354,10 @@ impl RFTrainingGUI {
             // ── Accuracy curve vs N trees ────────────────────────
             push("   📈 Menghitung kurva akurasi vs N trees...");
             let n_total = rf.n_trees();
-            let checkpoints: Vec<usize> = (1..=10).map(|i| (n_total * i / 10).max(1)).collect();
+            let checkpoints: Vec<usize> = (1..=100).filter_map(|i| {
+                let n = if (i - 1) % 5 == 0 || i == 100 { Some(((n_total * i) / 100).max(1)) } else { None };
+                n
+            }).collect();
             let accuracy_curve: Vec<(usize, f32, f32)> = checkpoints.iter().map(|&n| {
                 let ta = rf.evaluate_at_n_trees(&train_rf, &train_dataset.labels, n);
                 let va = rf.evaluate_at_n_trees(&val_rf, &val_dataset.labels, n);

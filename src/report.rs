@@ -749,27 +749,35 @@ fn draw_page1(l: &PdfLayerReference,
     stroke_rect(l, ML, y, CW, rh * cfg.len() as f32, c_dark_gray(), 0.3);
     vline(l, ML + c0, y, y - rh * cfg.len() as f32, c_dark_gray(), 0.3);
     for i in 1..cfg.len() { hline(l, ML, ML + CW, y - rh * i as f32, c_dark_gray(), 0.3); }
-
-    let y2 = y - rh * cfg.len() as f32 - 8.0;
-    let y3 = section_title(l, fb, "GAS SENSORS USED (8 Sensors)", y2);
-    let sensors = ["TGS2600", "MQ135", "MQ3", "MQ6", "MQ7", "TGS2602", "TGS2611", "TGS2620"];
-    for (i, s) in sensors.iter().enumerate() {
-        let bx = ML + (i % 4) as f32 * 46.0;
-        let by = y3 - 2.0 - (i / 4) as f32 * 10.0;
-        fill_rect(l, bx, by, 43.0, 8.0, c_dark_green());
-        txt(l, s, 8.5, bx + 3.0, by - 5.5, fb, c_white());
-    }
-
-    // Power section - rendered below the sensors if data is available
-    let y_after_sensors = y3 - 28.0; // 2 sensor rows (10mm each) + 8mm gap
-    if let Some(ps) = report.power() {
-        draw_power_section(l, f, fb, ps, y_after_sensors);
-    }
-
-    draw_footer(l, f, 1, 3);
+    
+    draw_footer(l, f, 1, 4);
 }
 
 fn draw_page2(l: &PdfLayerReference,
+              f: &IndirectFontRef, fb: &IndirectFontRef,
+              report: &TrainingReport) {
+    page_subheader(l, fb, "GAS SENSORS & POWER CONSUMPTION");
+    let mut y = PH - 25.0;
+    
+    y = section_title(l, fb, "GAS SENSORS USED (8 Sensors)", y);
+    y -= 2.0;
+    let sensors = ["TGS2600", "MQ135", "MQ3", "MQ6", "MQ7", "TGS2602", "TGS2611", "TGS2620"];
+    for (i, s) in sensors.iter().enumerate() {
+        let bx = ML + (i % 4) as f32 * 46.0;
+        let by = y - 2.0 - (i / 4) as f32 * 10.0;
+        fill_rect(l, bx, by, 43.0, 8.0, c_dark_green());
+        txt(l, s, 8.5, bx + 3.0, by - 5.5, fb, c_white());
+    }
+    
+    let y_after_sensors = y - 28.0;
+    if let Some(ps) = report.power() {
+        draw_power_section(l, f, fb, ps, y_after_sensors);
+    }
+    
+    draw_footer(l, f, 2, 4);
+}
+
+fn draw_page3(l: &PdfLayerReference,
               f: &IndirectFontRef, fb: &IndirectFontRef,
               report: &TrainingReport) {
     page_subheader(l, fb, "MODEL EVALUATION RESULTS");
@@ -779,10 +787,10 @@ fn draw_page2(l: &PdfLayerReference,
     y = eval_table(l, f, fb, report.val_eval(), "Validation Data", y);
     y -= 8.0;
     confusion_matrix_grid(l, f, fb, report.val_eval().confusion_matrix, y);
-    draw_footer(l, f, 2, 3);
+    draw_footer(l, f, 3, 4);
 }
 
-fn draw_page3(l: &PdfLayerReference,
+fn draw_page4(l: &PdfLayerReference,
               f: &IndirectFontRef, fb: &IndirectFontRef,
               report: &TrainingReport) {
     page_subheader(l, fb, "MODEL DETAILS & TRAINING CURVES");
@@ -870,12 +878,12 @@ fn draw_page3(l: &PdfLayerReference,
         }
     }
 
-    draw_footer(l, f, 3, 3);
+    draw_footer(l, f, 4, 4);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Generate a structured 3-page A4 PDF training report.
+/// Generate a structured 4-page A4 PDF training report.
 /// Returns the output file path on success, or an error message on failure.
 pub fn generate_training_pdf(report: &TrainingReport, output_dir: &str)
     -> Result<String, String>
@@ -900,6 +908,9 @@ pub fn generate_training_pdf(report: &TrainingReport, output_dir: &str)
 
     let (p3, l3) = doc.add_page(Mm(PW), Mm(PH), "Layer 1");
     draw_page3(&doc.get_page(p3).get_layer(l3), &f, &fb, report);
+
+    let (p4, l4) = doc.add_page(Mm(PW), Mm(PH), "Layer 1");
+    draw_page4(&doc.get_page(p4).get_layer(l4), &f, &fb, report);
 
     std::fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
     doc.save(&mut BufWriter::new(
