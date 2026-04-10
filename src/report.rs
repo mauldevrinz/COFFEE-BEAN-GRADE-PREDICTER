@@ -793,7 +793,7 @@ fn draw_page3(l: &PdfLayerReference,
 fn draw_page4(l: &PdfLayerReference,
               f: &IndirectFontRef, fb: &IndirectFontRef,
               report: &TrainingReport) {
-    page_subheader(l, fb, "MODEL DETAILS & TRAINING CURVES");
+    page_subheader(l, fb, "ACCURACY CURVE (CHECKPOINT)");
     let mut y = PH - 25.0;
 
     match report {
@@ -815,7 +815,7 @@ fn draw_page4(l: &PdfLayerReference,
         }
 
         TrainingReport::MLP { n_epochs, train_loss, val_loss, training_secs: _,
-                              accuracy_curve, loss_curve, .. } => {
+                              accuracy_curve, .. } => {
             y = section_title(l, fb, &format!("MLP Summary -- {} Epochs", n_epochs), y);
             y -= 2.0;
             let summary = [
@@ -825,9 +825,7 @@ fn draw_page4(l: &PdfLayerReference,
             ];
             y = kv_table(l, f, fb, &summary, y);
             y -= 6.0;
-            y = accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
-            y -= 6.0;
-            loss_checkpoint_table(l, f, fb, loss_curve, y);
+            accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
         }
 
         TrainingReport::SVM { n_epochs, n_support_vectors, final_loss, training_secs: _,
@@ -846,7 +844,7 @@ fn draw_page4(l: &PdfLayerReference,
         }
 
         TrainingReport::LSTM { n_epochs, train_loss, val_loss, training_secs: _,
-                               accuracy_curve, loss_curve, .. } => {
+                               accuracy_curve, .. } => {
             y = section_title(l, fb, &format!("LSTM Summary -- {} Epochs", n_epochs), y);
             y -= 2.0;
             let summary = [
@@ -856,13 +854,11 @@ fn draw_page4(l: &PdfLayerReference,
             ];
             y = kv_table(l, f, fb, &summary, y);
             y -= 6.0;
-            y = accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
-            y -= 6.0;
-            loss_checkpoint_table(l, f, fb, loss_curve, y);
+            accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
         }
 
         TrainingReport::CNN { n_epochs, train_loss, val_loss, training_secs: _,
-                              accuracy_curve, loss_curve, .. } => {
+                              accuracy_curve, .. } => {
             y = section_title(l, fb, &format!("1D-CNN Summary -- {} Epochs", n_epochs), y);
             y -= 2.0;
             let summary = [
@@ -872,18 +868,49 @@ fn draw_page4(l: &PdfLayerReference,
             ];
             y = kv_table(l, f, fb, &summary, y);
             y -= 6.0;
-            y = accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
-            y -= 6.0;
+            accuracy_checkpoint_table(l, f, fb, "Epoch", accuracy_curve, y);
+        }
+    }
+
+    draw_footer(l, f, 4, 5);
+}
+
+fn draw_page5(l: &PdfLayerReference,
+              f: &IndirectFontRef, fb: &IndirectFontRef,
+              report: &TrainingReport) {
+    page_subheader(l, fb, "LOSS CURVE (CHECKPOINT)");
+    let y = PH - 25.0;
+
+    match report {
+        TrainingReport::RandomForest { .. } => {
+            // RF tidak punya loss curve
+            txt_center(l, "Random Forest - No Loss Curve", 11.0, PH / 2.0, f, c_dark_gray());
+        }
+
+        TrainingReport::MLP { loss_curve, .. } => {
+            loss_checkpoint_table(l, f, fb, loss_curve, y);
+        }
+
+        TrainingReport::SVM { .. } => {
+            // SVM tidak punya loss curve tracking
+            txt_center(l, "SVM - No Loss Curve", 11.0, PH / 2.0, f, c_dark_gray());
+        }
+
+        TrainingReport::LSTM { loss_curve, .. } => {
+            loss_checkpoint_table(l, f, fb, loss_curve, y);
+        }
+
+        TrainingReport::CNN { loss_curve, .. } => {
             loss_checkpoint_table(l, f, fb, loss_curve, y);
         }
     }
 
-    draw_footer(l, f, 4, 4);
+    draw_footer(l, f, 5, 5);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Generate a structured 4-page A4 PDF training report.
+/// Generate a structured 5-page A4 PDF training report.
 /// Returns the output file path on success, or an error message on failure.
 pub fn generate_training_pdf(report: &TrainingReport, output_dir: &str)
     -> Result<String, String>
@@ -911,6 +938,9 @@ pub fn generate_training_pdf(report: &TrainingReport, output_dir: &str)
 
     let (p4, l4) = doc.add_page(Mm(PW), Mm(PH), "Layer 1");
     draw_page4(&doc.get_page(p4).get_layer(l4), &f, &fb, report);
+
+    let (p5, l5) = doc.add_page(Mm(PW), Mm(PH), "Layer 1");
+    draw_page5(&doc.get_page(p5).get_layer(l5), &f, &fb, report);
 
     std::fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
     doc.save(&mut BufWriter::new(
